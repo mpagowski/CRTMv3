@@ -12,6 +12,10 @@
 !                       isaac.moradi@nasa.gov
 !                       Modifications to include back scattering information
 !
+!       Modified by:    Congmeng Lyu, 17-Sep-2026
+!                       Added the Absorption_Optical_Depth component for the
+!                       aerosol absorption optical depth (AAOD)
+!
 
 MODULE CRTM_AtmOptics_Define
 
@@ -116,6 +120,12 @@ MODULE CRTM_AtmOptics_Define
     REAL(fp) :: depolarization = 0.0279_fp
     ! Array components
     REAL(fp), ALLOCATABLE :: Optical_Depth(:)         ! K-Max
+    ! ...Aerosol absorption optical depth (1-w)*ke*rho, un-truncated (i.e. not
+    !    delta-scaled). Populated by CRTM_Compute_AerosolScatter (and _TL), read as
+    !    the adjoint input by CRTM_Compute_AerosolScatter_AD, and consumed only by
+    !    CRTM_AAOD_Module (the radiance path fills but ignores it). Not part of
+    !    the AtmOptics binary file format.
+    REAL(fp), ALLOCATABLE :: Absorption_Optical_Depth(:) ! K-Max
     REAL(fp), ALLOCATABLE :: Single_Scatter_Albedo(:) ! K-Max
     REAL(fp), ALLOCATABLE :: Asymmetry_Factor(:)      ! K-Max
     REAL(fp), ALLOCATABLE :: Backscat_Coefficient(:)  ! K-Max
@@ -308,6 +318,7 @@ CONTAINS
       INTEGER                  , INTENT(OUT) :: alloc_stat
       ! Allocate object
       ALLOCATE( self%Optical_Depth( n_Layers ), &
+                self%Absorption_Optical_Depth( n_Layers ), &
                 self%Single_Scatter_Albedo( n_Layers ), &
                 self%Asymmetry_Factor( n_Layers ), &
                 self%Backscat_Coefficient( n_Layers ), &
@@ -315,6 +326,7 @@ CONTAINS
                 self%Phase_Coefficient( 0:n_Legendre_Terms, n_Phase_Elements, n_Layers ), &
                 STAT = alloc_stat )
       self%Single_Scatter_Albedo(:) = ZERO
+      self%Absorption_Optical_Depth(:) = ZERO
       IF ( alloc_stat /= 0 ) RETURN
       ! Set maximum dimension values
       self%Max_Layers         = n_Layers
@@ -354,6 +366,7 @@ CONTAINS
     self%Scattering_Optical_Depth = ZERO
     IF ( .NOT. CRTM_AtmOptics_Associated( self ) ) RETURN
     self%Optical_Depth         = ZERO
+    self%Absorption_Optical_Depth = ZERO
     self%Single_Scatter_Albedo = ZERO
     self%Asymmetry_Factor      = ZERO
     self%Backscat_Coefficient  = ZERO
@@ -399,6 +412,8 @@ CONTAINS
     ! Dimension arrays
     WRITE(*,'(3x,"Optical_Depth :")')
     WRITE(*,'(5(1x,es22.15,:))') self%Optical_Depth(1:self%n_Layers)
+    WRITE(*,'(3x,"Absorption_Optical_Depth :")')
+    WRITE(*,'(5(1x,es22.15,:))') self%Absorption_Optical_Depth(1:self%n_Layers)
     WRITE(*,'(3x,"Single_Scatter_Albedo :")')
     WRITE(*,'(5(1x,es22.15,:))') self%Single_Scatter_Albedo(1:self%n_Layers)
     WRITE(*,'(3x,"Asymmetry_Factor :")')
@@ -631,6 +646,10 @@ CONTAINS
     IF ( (.NOT. ALL(Compares_Within_Tolerance( &
                       x%Optical_Depth(1:k), &
                       y%Optical_Depth(1:k), &
+                      n                      ))) .OR. &
+         (.NOT. ALL(Compares_Within_Tolerance( &
+                      x%Absorption_Optical_Depth(1:k), &
+                      y%Absorption_Optical_Depth(1:k), &
                       n                      ))) .OR. &
          (.NOT. ALL(Compares_Within_Tolerance( &
                       x%Single_Scatter_Albedo(1:k), &
@@ -1416,6 +1435,7 @@ CONTAINS
       ic = x%n_Legendre_Terms
       k = x%n_Layers
       IF ( .NOT. (ALL(x%Optical_Depth(1:k)         .EqualTo. y%Optical_Depth(1:k)        ) .AND. &
+                  ALL(x%Absorption_Optical_Depth(1:k) .EqualTo. y%Absorption_Optical_Depth(1:k)) .AND. &
                   ALL(x%Single_Scatter_Albedo(1:k) .EqualTo. y%Single_Scatter_Albedo(1:k)) .AND. &
                   ALL(x%Asymmetry_Factor(1:k)      .EqualTo. y%Asymmetry_Factor(1:k)     ) .AND. &
                   ALL(x%Backscat_Coefficient(1:k)  .EqualTo. y%Backscat_Coefficient(1:k) ) .AND. &
@@ -1488,6 +1508,7 @@ CONTAINS
     ip = aosum%n_Phase_Elements
     ic = aosum%n_Legendre_Terms
     aosum%Optical_Depth(1:k)               = aosum%Optical_Depth(1:k)               + ao2%Optical_Depth(1:k)
+    aosum%Absorption_Optical_Depth(1:k)    = aosum%Absorption_Optical_Depth(1:k)    + ao2%Absorption_Optical_Depth(1:k)
     aosum%Single_Scatter_Albedo(1:k)       = aosum%Single_Scatter_Albedo(1:k)       + ao2%Single_Scatter_Albedo(1:k)
     aosum%Asymmetry_Factor(1:k)            = aosum%Asymmetry_Factor(1:k)            + ao2%Asymmetry_Factor(1:k)
     aosum%Backscat_Coefficient(1:k)        = aosum%Backscat_Coefficient(1:k)        + ao2%Backscat_Coefficient(1:k)
@@ -1554,6 +1575,7 @@ CONTAINS
     ip = aodiff%n_Phase_Elements
     ic = aodiff%n_Legendre_Terms
     aodiff%Optical_Depth(1:k)               = aodiff%Optical_Depth(1:k)               - ao2%Optical_Depth(1:k)
+    aodiff%Absorption_Optical_Depth(1:k)    = aodiff%Absorption_Optical_Depth(1:k)    - ao2%Absorption_Optical_Depth(1:k)
     aodiff%Single_Scatter_Albedo(1:k)       = aodiff%Single_Scatter_Albedo(1:k)       - ao2%Single_Scatter_Albedo(1:k)
     aodiff%Asymmetry_Factor(1:k)            = aodiff%Asymmetry_Factor(1:k)            - ao2%Asymmetry_Factor(1:k)
     aodiff%Backscat_Coefficient(1:k)        = aodiff%Backscat_Coefficient(1:k)        - ao2%Backscat_Coefficient(1:k)

@@ -37,6 +37,7 @@ list( APPEND crtm_src_files
       AtmScatter/CloudScatter/CSvar_Define.f90
       AtmScatter/CRTM_AerosolScatter.f90
       AtmScatter/CRTM_AOD_Module.f90
+      AtmScatter/CRTM_AAOD_Module.f90
       AtmScatter/CRTM_CloudScatter.f90
       AtmScatter/CRTM_MoleculeScatter.f90
       ChannelInfo/CRTM_ChannelInfo_Define.f90

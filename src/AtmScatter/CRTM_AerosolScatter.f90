@@ -21,6 +21,11 @@
 !                       dangch@ucar.edu
 !                       Update FWD/TL/AD to include RH dimension and GOCART-GEOS5 table
 !                       14-Mar-2021; Update to include NAAPS table
+!       Modified by:    Congmeng Lyu, 17-Sep-2026
+!                       Absorption optical depth (AAOD) forward calculation
+!       Modified by:    Congmeng Lyu, 24-Sep-2026
+!                       AAOD tangent-linear and adjoint terms in
+!                       CRTM_Compute_AerosolScatter_TL / _AD
 ! (C) Copyright 2019 UCAR
 !
 
@@ -287,6 +292,28 @@ CONTAINS
         AScat%Optical_Depth(ka) = AScat%Optical_Depth(ka) + &
                                   (ASV%ke(ka,n)*Atm%Aerosol(n)%Concentration(ka))
 
+        ! Compute the absorption optical depth (absorption only)
+        !   tau_abs = rho.ke.(1-w)
+        ! where
+        !   rho = Integrated Aerosol Concentration for a layer(kg/m^2) [M.L^-2]
+        !   ke  = mass extintion coefficient (m^2/kg) [L^2.M^-1]
+        !   w   = single scatter albedo [dimensionless]; this is ASV%w, the
+        !         value interpolated from the AerosolCoeff LUT by Get_Aerosol_Opt,
+        !         after the interpolation quality control clamps above (0<=w<=1)
+        ! As for tau, the quantity is height/thickness independent and it is
+        ! NOT delta-scaled (truncated); it is only consumed by CRTM_AAOD_Module.
+        ! When scattering is switched off (n_Phase_Elements == 0 or
+        ! .NOT. Include_Scattering) Get_Aerosol_Opt has already returned the
+        ! absorption coefficient ke := ke.(1-w), so in that case the contribution
+        ! is simply rho.ke, identical to the Optical_Depth contribution above.
+        IF( AScat%n_Phase_Elements > 0 .and. AScat%Include_Scattering ) THEN
+          AScat%Absorption_Optical_Depth(ka) = AScat%Absorption_Optical_Depth(ka) + &
+                                               ((ONE - ASV%w(ka,n))*ASV%ke(ka,n)*Atm%Aerosol(n)%Concentration(ka))
+        ELSE
+          AScat%Absorption_Optical_Depth(ka) = AScat%Absorption_Optical_Depth(ka) + &
+                                               (ASV%ke(ka,n)*Atm%Aerosol(n)%Concentration(ka))
+        END IF
+
         ! Compute the phase matrix coefficients
         ! p = p + p(LUT)*bs
         ! where
@@ -509,6 +536,24 @@ CONTAINS
         AScat_TL%Optical_Depth(ka) = AScat_TL%Optical_Depth(ka) + &
                                      (ke_TL        * Atm%Aerosol(n)%Concentration(ka)) + &
                                      (ASV%ke(ka,n) * Atm_TL%Aerosol(n)%Concentration(ka))
+
+        ! Compute the tangent-linear absorption optical depth (AAOD), mirroring
+        ! the forward accumulation in CRTM_Compute_AerosolScatter:
+        !   scattering on : AAOD = (1-w).ke.rho
+        !                   -> dAAOD = (1-w).ke.drho + (1-w).rho.dke - ke.rho.dw
+        !   scattering off: AAOD = ke.rho with ke already the absorption
+        !                   coefficient (Get_Aerosol_Opt_TL has folded dw into
+        !                   ke_TL), i.e. the same expression as Optical_Depth
+        IF( n_Phase_Elements > 0 .and. AScat%Include_Scattering ) THEN
+          AScat_TL%Absorption_Optical_Depth(ka) = AScat_TL%Absorption_Optical_Depth(ka) + &
+            ((ONE - ASV%w(ka,n)) * ASV%ke(ka,n) * Atm_TL%Aerosol(n)%Concentration(ka)) + &
+            ((ONE - ASV%w(ka,n)) * ke_TL        * Atm%Aerosol(n)%Concentration(ka)   ) - &
+            (ASV%ke(ka,n) * Atm%Aerosol(n)%Concentration(ka) * w_TL)
+        ELSE
+          AScat_TL%Absorption_Optical_Depth(ka) = AScat_TL%Absorption_Optical_Depth(ka) + &
+            (ke_TL        * Atm%Aerosol(n)%Concentration(ka)) + &
+            (ASV%ke(ka,n) * Atm_TL%Aerosol(n)%Concentration(ka))
+        END IF
         ! Compute the back scatter coefficient
         AScat_TL%Backscat_Coefficient(ka) = AScat_TL%Backscat_Coefficient(ka) + &
                                             (kb_TL        * Atm%Aerosol(n)%Concentration(ka)) + &
@@ -738,6 +783,23 @@ CONTAINS
         Atm_AD%Aerosol(n)%Concentration(ka) = Atm_AD%Aerosol(n)%Concentration(ka) + &
                                               (ASV%ke(ka,n) * AScat_AD%Optical_Depth(ka))
         ke_AD = ke_AD + (Atm%Aerosol(n)%Concentration(ka) * AScat_AD%Optical_Depth(ka))
+
+        ! Compute the adjoint of the absorption optical depth (AAOD);
+        ! the two branches mirror CRTM_Compute_AerosolScatter_TL.  The w_AD
+        ! contribution is added before the interpolation quality control
+        ! below, which zeroes it where the forward w was clamped.
+        IF( n_Phase_Elements > 0 .and. AScat%Include_Scattering ) THEN
+          Atm_AD%Aerosol(n)%Concentration(ka) = Atm_AD%Aerosol(n)%Concentration(ka) + &
+            ((ONE - ASV%w(ka,n)) * ASV%ke(ka,n) * AScat_AD%Absorption_Optical_Depth(ka))
+          ke_AD = ke_AD + ((ONE - ASV%w(ka,n)) * Atm%Aerosol(n)%Concentration(ka) * &
+                           AScat_AD%Absorption_Optical_Depth(ka))
+          w_AD  = w_AD  - (ASV%ke(ka,n) * Atm%Aerosol(n)%Concentration(ka) * &
+                           AScat_AD%Absorption_Optical_Depth(ka))
+        ELSE
+          Atm_AD%Aerosol(n)%Concentration(ka) = Atm_AD%Aerosol(n)%Concentration(ka) + &
+            (ASV%ke(ka,n) * AScat_AD%Absorption_Optical_Depth(ka))
+          ke_AD = ke_AD + (Atm%Aerosol(n)%Concentration(ka) * AScat_AD%Absorption_Optical_Depth(ka))
+        END IF
 
         ! Compute the adjoint of the backscatter coefficient
         Atm_AD%Aerosol(n)%Concentration(ka) = Atm_AD%Aerosol(n)%Concentration(ka) + &

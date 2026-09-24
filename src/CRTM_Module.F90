@@ -37,6 +37,8 @@ MODULE CRTM_Module
 
   ! ...The aerosol optical depth tool
   USE CRTM_AOD_Module
+  ! ...The aerosol absorption optical depth tool (parallel to CRTM_AOD_Module)
+  USE CRTM_AAOD_Module
 
 
   ! Visibility
