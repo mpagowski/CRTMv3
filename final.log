@@ -1,0 +1,33 @@
+
+※ recap: Goal: add AAOD to CRTM through an optional AAOD flag on the four CRTM_AOD functions; that flag and its tests are done and pass, and the forward unit test now also saves netCDF output. Next: commit the changes on feature/aaod_mzp when you're ready.
+
+❯ we are done for now                                                           
+
+● Sounds good. Here's where things stand, all uncommitted on branch
+  feature/aaod_mzp.
+
+  Source change: src/AtmScatter/CRTM_AOD_Module.f90 gets an optional AAOD
+  argument in CRTM_AOD, CRTM_AOD_TL, CRTM_AOD_AD and CRTM_AOD_K. With
+  AAOD=.TRUE., scattering is switched off, so ke becomes ke*(1-w) and AAOD is
+  returned in the arrays that normally hold AOD.
+
+  Tests (in test/):
+  - Unit tests: test_Unit_AerosolScatter_AAOD_TL, _AD and _K. The TL test also
+    saves the forward AAOD result in netCDF.
+  - Regression tests: forward/test_AAOD and k_matrix/test_AAOD, run for the 6
+    sensors in AAOD_Sensor_Ids.
+  - CMakeLists.txt: the new test entries, the AAOD_Sensor_Ids list, and AAOD in
+    common_tests.
+
+  Status: the full CRTM suite passed on the last full run. The netCDF change
+  afterwards touched only the AAOD_TL unit test, and all three AAOD unit tests
+  passed after it. The forward AAOD also matches your earlier independent
+  implementation to about 3e-16.
+
+  Known quirks:
+  - Negative w: for organic carbon near 1210 cm⁻¹, the table interpolation gives
+    w slightly below zero. You chose to accept this, with a 1e-4 tolerance.
+  - UFO not rebuilt: its objects still use the old CRTM_AOD interface, and you
+    asked me to leave UFO for now.
+
+✻ Worked for 6s · done 7:44 PM
