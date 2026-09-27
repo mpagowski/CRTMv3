@@ -204,6 +204,15 @@ list( APPEND AOD_Sensor_Ids
         airs_aqua
 )
 
+list( APPEND AAOD_Sensor_Ids
+        cris-fsr_n21
+        v.abi_g18
+        cris399_npp
+        v.abi_gr
+        abi_g18
+        airs_aqua
+)
+
 # Create list of sensor ids for testing
 list( APPEND Zeeman_Sensor_Ids
       ssmis_f20
@@ -242,6 +251,7 @@ list( APPEND OMPoverChannels_Sensor_Ids
 list (APPEND common_tests
      Simple
      AOD
+     AAOD
      Zeeman
      ChannelSubset
      ClearSky
@@ -315,6 +325,24 @@ target_link_libraries(Unit_AerosolScatter_K PRIVATE crtm)
 add_test(NAME test_Unit_AerosolScatter_K
          COMMAND $<TARGET_FILE:Unit_AerosolScatter_K>)
 set_tests_properties(test_Unit_AerosolScatter_K PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=$ENV{OMP_NUM_THREADS}")
+
+add_executable(Unit_AerosolScatter_AAOD_TL mains/unit/Unit_Test/test_AerosolScatter_AAOD_TL.f90)
+target_link_libraries(Unit_AerosolScatter_AAOD_TL PRIVATE crtm)
+add_test(NAME test_Unit_AerosolScatter_AAOD_TL
+         COMMAND $<TARGET_FILE:Unit_AerosolScatter_AAOD_TL>)
+set_tests_properties(test_Unit_AerosolScatter_AAOD_TL PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=$ENV{OMP_NUM_THREADS}")
+
+add_executable(Unit_AerosolScatter_AAOD_AD mains/unit/Unit_Test/test_AerosolScatter_AAOD_AD.f90)
+target_link_libraries(Unit_AerosolScatter_AAOD_AD PRIVATE crtm)
+add_test(NAME test_Unit_AerosolScatter_AAOD_AD
+         COMMAND $<TARGET_FILE:Unit_AerosolScatter_AAOD_AD>)
+set_tests_properties(test_Unit_AerosolScatter_AAOD_AD PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=$ENV{OMP_NUM_THREADS}")
+
+add_executable(Unit_AerosolScatter_AAOD_K mains/unit/Unit_Test/test_AerosolScatter_AAOD_K.f90)
+target_link_libraries(Unit_AerosolScatter_AAOD_K PRIVATE crtm)
+add_test(NAME test_Unit_AerosolScatter_AAOD_K
+         COMMAND $<TARGET_FILE:Unit_AerosolScatter_AAOD_K>)
+set_tests_properties(test_Unit_AerosolScatter_AAOD_K PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=$ENV{OMP_NUM_THREADS}")
 
 add_executable(Unit_Aerosol_Bypass_TL mains/unit/Unit_Test/test_Aerosol_Bypass_TL.f90)
 target_link_libraries(Unit_Aerosol_Bypass_TL PRIVATE crtm)

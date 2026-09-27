@@ -1,0 +1,1897 @@
+ ▐▛███▛█   Claude Code v2.1.283
+▝▜██████▀  Opus 5.5 · Claude Pro
+ ▝▝   ▝▝   /work/noaa/wrf-chem/pagowski/jedi/code/jedi-bundle/crtm/test
+
+  Get to finished work sooner with Opus 5.5. Switch anytime with /model.
+
+❯ /crtm_aaod_intro                                                              
+  ⎿  4 skills available
+
+● I'll look at the existing CRTM code to see how AOD is handled and what SSA
+  pieces already exist.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● RTSolution already has a Layer_Absorption_Optical_Depth field labelled AAOD.
+  I'll trace where it and the AOD path are used.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● CRTM_AOD_Module.f90 already references AtmOptics%Absorption_Optical_Depth.
+  Next I'll check whether that field is defined and actually computed anywhere.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The branch feature/aaod_mzp already has uncommitted plumbing. I'll look at the
+  diff and at how the AOD module calls AerosolScatter to see what's still
+  missing.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I've looked through the code. This step was a survey, so I haven't changed any
+  files yet. The storage and plumbing for AAOD are already there, uncommitted,
+  on branch feature/aaod_mzp. What's missing is the code that actually computes
+  AAOD in the forward model, the tangent linear (TL) and the adjoint (AD). Right
+  now the output would always be zero.
+
+  What's already in place (uncommitted)
+
+  File: src/AtmOptics/CRTM_AtmOptics_Define.f90:119
+  What it does: Adds Absorption_Optical_Depth(:) to AtmOptics: memory setup,
+  zeroing, printing, comparison, sum and difference.
+  ────────────────────────────────────────
+  File: src/RTSolution/CRTM_RTSolution_Define.f90:239
+  What it does: Adds Layer_Absorption_Optical_Depth(:) to RTSolution: memory
+  setup, zeroing, printing, comparison and the math helpers.
+  ────────────────────────────────────────
+  File: src/AtmScatter/CRTM_AOD_Module.f90
+  What it does: Copies the new field between AtmOptics and RTSolution in all
+  four
+  paths (forward, TL, AD, K-matrix), in both directions, next to
+  Layer_Optical_Depth.
+  ────────────────────────────────────────
+  File: test/CMakeLists.txt
+  What it does: Registers an AAOD test using the same sensors as AOD, and adds
+  it
+  to TLAD_tests.
+  ────────────────────────────────────────
+  File: test/mains/regression/*/test_AAOD/
+  What it does: Only helper include files (Load_Atm_Data.inc, AAOD_Utils.inc)
+  exist. The main test_AAOD.f90 programs are missing, so the tests can't build
+  yet.
+
+  What's missing: src/AtmScatter/CRTM_AerosolScatter.f90
+
+  Nothing ever writes to AScat%Absorption_Optical_Depth. This is the core of the
+  job. In CRTM's terms (ke is the extinction coefficient, w is the single
+  scattering albedo, c is the layer concentration), each part needs the
+  following:
+
+  - Forward (CRTM_Compute_AerosolScatter, near line 287, next to the
+    Optical_Depth sum):
+  AScat%Absorption_Optical_Depth(ka) = AScat%Absorption_Optical_Depth(ka) + &
+       (ONE - ASV%w(ka,n)) * ASV%ke(ka,n) * Atm%Aerosol(n)%Concentration(ka)
+    This has to sit outside the IF (n_Phase_Elements > 0 .and. 
+    Include_Scattering) block. AAOD needs w, but it must not depend on the
+    scattering switch.
+  - TL (near line 509):
+    aaod_TL += (1-w)*(ke*c_TL + ke_TL*c) - w_TL*ke*c
+  - AD (near line 739): transpose the TL line, adding to c_AD, ke_AD and a new
+    w_AD term. Right now w_AD only gets contributions through bs_AD, and only
+    when scattering is on.
+
+  Watch-out: the clipping of w. The forward code forces w into [0,1] at lines
+  262–273, and sets w=0 whenever ke<=0. Wherever that clipping kicks in, w_TL
+  and w_AD must be zero. Otherwise the TL/AD consistency test will fail.
+
+  Units. Your formula uses qm, a mixing ratio. Inside CRTM the variable is
+  Aerosol%Concentration in kg/m² per layer. The conversion from mixing ratio
+  happens upstream in UFO, so CRTM only needs the extinction coefficient and SSA
+  from the lookup table, both of which it already has.
+
+  Suggested order
+
+  1. Forward: add the AAOD sum in CRTM_Compute_AerosolScatter, then check it
+     against a hand calculation (/crtm_aaod_forward).
+  2. TL and AD: in CRTM_AerosolScatter.f90, taking care with the w clipping
+     (/crtm_aaod_tlad).
+  3. Tests: write the missing test_AAOD.f90 programs for forward, TL, AD and
+     K-matrix, then build and run the TL/AD checks (/crtm_aaod_create_tests).
+
+  Should I start with the forward change?
+
+✻ Cogitated for 49s · done 3:48 PM
+
+❯ add an AAOD flag to CRTM_AOD_Module.f90                                       
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● I'll add an optional LOGICAL :: AAOD argument to all four entry points,
+  defaulting to .FALSE. so existing callers behave unchanged, while .TRUE. fills
+  AAOD in forward/TL and includes the Layer_Absorption_Optical_Depth seed in
+  AD/K.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Now I'll apply the edits to all four functions with a script, since the same
+  pattern repeats in each.
+
+● Bash(cd
+      /work/noaa/wrf-chem/pagowski/jedi/code/jedi-bundle/crtm/src/AtmScatter;
+      python3 - <<'EOF'
+      import re…)
+  ⎿   src/AtmScatter/CRTM_AOD_Module.f90 | 136 ++++++++++++++++++++++++++++
+     ++++++---
+      1 file changed, 128 insertions(+), 8 deletions(-)
+  ⎿  Updated /work/noaa/wrf-chem/pagowski/jedi/code/jedi-bundle/crtm/src/At
+     mScatter/CRTM_AOD_Module.f90 (+128 -22)
+      88  !       Error_Status = CRTM_AOD( Atmosphere       , &
+      89  !                                ChannelInfo      , &
+      90  !                                RTSolution       , &
+      91 -!                                Options = Options  )          
+      91 +!                                Options = Options, &          
+      92 +!                                AAOD    = AAOD     )          
+      93  !
+      94  ! INPUTS:
+      95  !       Atmosphere:     Structure containing the Atmosphere dat
+          a.
+     ...
+      122  !                       DIMENSION:  Same as input Atmosphere s
+           tructure
+      123  !                       ATTRIBUTES: INTENT(IN), OPTIONAL
+      124  !
+      125 +!       AAOD:           Set to .TRUE. to also compute the laye
+          +r aerosol                                                     
+      126 +!                       absorption optical depth (AAOD) in the
+      127 +!                       Layer_Absorption_Optical_Depth compone
+          +nt of the                                                     
+      128 +!                       RTSolution structures. For the adjoint
+          + and K-matrix                                                 
+      129 +!                       functions this also includes the AAOD 
+          +adjoint forcing                                               
+      130 +!                       from RTSolution_AD/K. If not specified
+          +, or .FALSE.,                                                 
+      131 +!                       only AOD is computed and the AAOD comp
+          +onents are zero.                                              
+      132 +!                       UNITS:      N/A                       
+      133 +!                       TYPE:       LOGICAL                   
+      134 +!                       DIMENSION:  Scalar                    
+      135 +!                       ATTRIBUTES: INTENT(IN), OPTIONAL      
+      136 +!                                                             
+      137  ! FUNCTION RESULT:
+      138  !       Error_Status:   The return value is an integer definin
+           g the error status.
+      139  !                       The error codes are defined in the Mes
+           sage_Handler module.
+     ...
+      155      Atmosphere , &  ! Input, M
+      156      ChannelInfo, &  ! Input, M
+      157      RTSolution , &  ! Output, L x M
+      145 -    Options    ) &  ! Optional input, M                       
+      158 +    Options    , &  ! Optional input, M                       
+      159 +    AAOD       ) &  ! Optional input, scalar                  
+      160    RESULT( Error_Status )
+      161      ! Arguments
+      162      TYPE(CRTM_Atmosphere_type),        INTENT(IN)     :: Atmos
+           phere(:)     ! M
+      163      TYPE(CRTM_ChannelInfo_type),       INTENT(IN)     :: Chann
+           elInfo(:)    ! n_Sensors
+      164      TYPE(CRTM_RTSolution_type),        INTENT(IN OUT) :: RTSol
+           ution(:,:)   ! L x M
+      165      TYPE(CRTM_Options_type), OPTIONAL, INTENT(IN)     :: Optio
+           ns(:)        ! M
+      166 +    LOGICAL,                 OPTIONAL, INTENT(IN)     :: AAOD 
+     … 291 more lines (ctrl+o to expand)
+
+● Every pattern matched exactly four times, or once for the TL-only edit. Next
+  I'll check the result and compile it.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Next, a check for lines over Fortran's 132-character limit, then a build of
+  the crtm target:
+
+  Ran 6 shell commands (ctrl+o to expand)
+
+● The reconfigure failed because Intel/MPI modules aren't loaded in my
+  shell—I'll look for your environment setup script to fix that.
+
+  Read 1 file, listed 1 directory (ctrl+o to expand)
+
+● ~/.jedi sets up the same spack-stack the build was configured with. I'll load
+  it and rebuild the crtm target.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● CMake can't regenerate since the test_AAOD.f90 main programs referenced in
+  test/CMakeLists.txt don't exist yet—this predates my edit. I'll instead
+  compile the file by hand with the existing build flags to verify my change
+  works, sending output to the scratchpad.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● I added an optional AAOD flag to all four functions in
+  src/AtmScatter/CRTM_AOD_Module.f90: CRTM_AOD, CRTM_AOD_TL, CRTM_AOD_AD and
+  CRTM_AOD_K. The file compiles cleanly on its own, but I couldn't build the
+  full library or run any tests (explained below).
+
+  How it works
+  - Argument: it's a new last argument, LOGICAL, OPTIONAL, INTENT(IN) :: AAOD.
+    Inside each function a local Compute_AAOD defaults to .FALSE. and takes the
+    flag's value when you pass it.
+  - Forward and TL: with the flag on, Layer_Absorption_Optical_Depth (and its TL
+    counterpart) is copied from AtmOptics. With it off, the field is set to
+    zero.
+  - AD and K: the AAOD adjoint input from RTSolution_AD or RTSolution_K is
+    passed into the calculation only when the flag is on. Otherwise it is
+    ignored.
+  - Docs: each function's header comments now describe the flag and show it in
+    the calling sequence.
+
+  With the flag off or left out, the functions give exactly the results they
+  gave before, so existing callers such as UFO don't need changes. To turn it
+  on, call for example CRTM_AOD_TL(..., Options=opts, AAOD=.TRUE.).
+
+  Build status
+  - Compile check: the file compiles with the build's own compiler (mpiifort)
+    and -warn all, with no errors or warnings. I built it against the module
+    files already in your build directory and wrote the output to my scratchpad,
+    so nothing in the build tree was touched.
+  - Full library build: make crtm fails, and not because of this edit. CMake
+    stops because test/CMakeLists.txt registers AAOD tests whose main programs
+    (test_AAOD.f90 for forward, TL, AD and K-matrix) don't exist yet. Until
+    those are written, or AAOD is temporarily taken out of that file, the
+    library won't rebuild.
+  - Failed reconfigure: my first make attempt, run before the JEDI modules were
+    loaded, set off a CMake reconfigure that failed on MPI. The later attempt
+    with ~/.jedi sourced got past MPI and stopped only at the missing test
+    files.
+
+  Still to do
+  - The calculation itself: nothing computes AtmOptics%Absorption_Optical_Depth
+    yet, so even with AAOD=.TRUE. the output is zero. That code goes in
+    CRTM_AerosolScatter.f90, the forward/TL/AD step.
+  - Skipping the work: the flag only controls what goes in and out; the aerosol
+    routine doesn't see it. If you want it to skip the AAOD work when the flag
+    is off, the flag would also have to be carried into AtmOptics, as
+    Include_Scattering is today.
+
+✻ Crunched for 3m 31s · done 3:53 PM
+
+※ recap: We're adding absorption AOD (AAOD) to CRTM, and the optional AAOD flag is now in CRTM_AOD_Module.f90 and compiles cleanly. Next, I'll add the actual AAOD calculation to the forward routine in CRTM_AerosolScatter.f90. (disable recaps in /config)
+
+❯ carry flag AAOD into AtmOptics so that AAOD is calculated correctly when flag 
+  AAOD=.TRUE.                                                                   
+
+● I'll read the AtmOptics definition and the aerosol TL/AD code before changing
+  anything.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● Now the forward Get_Aerosol_Opt, to confirm w is always computed whether or
+  not scattering is on. I'll also check how AtmOptics compares its scalar
+  fields:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Get_Aerosol_Opt has an important branch: when scattering is off, ke is
+  replaced by ke*(1-w). I'll read that block and the AtmOptics setup in the AOD
+  module.
+
+  Ran 1 shell command (ctrl+o to expand)
+● Since Get_Aerosol_Opt toggles ASV%ke's meaning based on scattering (extinction
+  when on, absorption when off), the AAOD formula must branch to avoid
+  double-applying (1-w). Now I'll check the AD counterpart of that branch.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Absorption handling is consistent across ke, ke_TL, and ke_AD, so the AAOD
+  code can reuse the same branch. I'll now edit the flag in AtmOptics followed
+  by the AOD module.
+
+● Bash(cd /work/noaa/wrf-chem/pagowski/jedi/code/jedi-bundle/crtm/src;
+      SP=/tmp/claude-8190/-work-noaa-wrf-chem-pagowski-claude-crtm/d0060a5a-5b0f
+      -4436-baa4-7e67cfa7593…)
+  ⎿  AtmOptics/CRTM_AtmOptics_Define.f90:114:    LOGICAL  :: Include_AAOD
+          = .FALSE.  ! Compute aerosol absorption optical depth
+     AtmOptics/CRTM_AtmOptics_Define.f90:629:         (x%Include_AAOD
+     … +15 lines (ctrl+o to expand)
+  ⎿  Updated /work/noaa/wrf-chem/pagowski/jedi/code/jedi-bundle/crtm/src/At
+     mOptics/CRTM_AtmOptics_Define.f90 (+2 -0)
+      111      INTEGER :: Max_Phase_Elements = 0  ! Ip-Max dimension
+      112      ! Scalar components
+      113      LOGICAL  :: Include_Scattering = .TRUE.
+      114 +    LOGICAL  :: Include_AAOD       = .FALSE.  ! Compute aeroso
+          +l absorption optical depth                                    
+      115      INTEGER  :: lOffset = 0   ! Start position in array for Le
+           gendre coefficients
+      116      REAL(fp) :: Scattering_Optical_Depth = ZERO
+      117      REAL(fp) :: depolarization = 0.0279_fp
+     ...
+      626  
+      627      ! Check scalar components
+      628      IF ( (x%Include_Scattering .NEQV. y%Include_Scattering ) .
+           OR. &
+      629 +         (x%Include_AAOD       .NEQV. y%Include_AAOD       ) .
+          +OR. &                                                         
+      630           (x%lOffset             /=    y%lOffset            ) .
+           OR. &
+      631           (.NOT. Compares_Within_Tolerance(x%Scattering_Optical
+           _Depth,&
+      632                                            y%Scattering_Optical
+           _Depth, n)) ) RETURN
+  ⎿  Updated /work/noaa/wrf-chem/pagowski/jedi/code/jedi-bundle/crtm/src/At
+     mScatter/CRTM_AOD_Module.f90 (+7 -0)
+      344  
+      345            ! Initialisations
+      346            CALL CRTM_AtmOptics_Zero( AtmOptics )
+      347 +          AtmOptics%Include_AAOD = Compute_AAOD               
+      348  
+      349  
+      350            ! Compute the aerosol absorption/scattering properti
+           es
+     ...
+      691            ! Initialisations
+      692            CALL CRTM_AtmOptics_Zero( AtmOptics )
+      693            CALL CRTM_AtmOptics_Zero( AtmOptics_TL )
+      694 +          AtmOptics%Include_AAOD    = Compute_AAOD            
+      695 +          AtmOptics_TL%Include_AAOD = Compute_AAOD            
+      696  
+      697  
+      698            ! Compute the aerosol absorption/scattering properti
+           es
+     ...
+      1077            ! Initialisations
+      1078            CALL CRTM_AtmOptics_Zero( AtmOptics )
+      1079            CALL CRTM_AtmOptics_Zero( AtmOptics_AD )
+      1080 +          AtmOptics%Include_AAOD    = Compute_AAOD           
+      1081 +          AtmOptics_AD%Include_AAOD = Compute_AAOD           
+      1082            AtmOptics_AD%Optical_Depth = RTSolution_AD(ln,m)%La
+            yer_Optical_Depth(1:Atmosphere(m)%n_Layers)
+      1083            ! ...AAOD adjoint forcing only if requested
+      1084            IF ( Compute_AAOD ) &
+     ...
+      1461            ! Initialisations
+      1462            CALL CRTM_AtmOptics_Zero( AtmOptics )
+      1463            CALL CRTM_AtmOptics_Zero( AtmOptics_K )
+      1464 +          AtmOptics%Include_AAOD    = Compute_AAOD           
+      1465 +          AtmOptics_K%Include_AAOD = Compute_AAOD            
+      1466            AtmOptics_K%Optical_Depth = RTSolution_K(ln,m)%Laye
+            r_Optical_Depth(1:Atmosphere(m)%n_Layers)
+      1467            ! ...AAOD adjoint forcing only if requested
+      1468            IF ( Compute_AAOD ) &
+
+● Now the AAOD calculation itself in CRTM_AerosolScatter.f90 (forward, TL and
+  AD):
+
+● Bash(cd /work/noaa/wrf-chem/pagowski/jedi/code/jedi-bundle/crtm/src; sed -i
+      's/^          AtmOptics_K%Include_AAOD = Compute_AAOD/
+      AtmOptics_K%Include_AAOD…)
+  ⎿  1
+  ⎿  Updated /work/noaa/wrf-chem/pagowski/jedi/code/jedi-bundle/crtm/src/At
+     mScatter/CRTM_AOD_Module.f90 (+1 -1)
+      1462            CALL CRTM_AtmOptics_Zero( AtmOptics )
+      1463            CALL CRTM_AtmOptics_Zero( AtmOptics_K )
+      1464            AtmOptics%Include_AAOD    = Compute_AAOD
+      1465 -          AtmOptics_K%Include_AAOD = Compute_AAOD            
+      1465 +          AtmOptics_K%Include_AAOD  = Compute_AAOD           
+      1466            AtmOptics_K%Optical_Depth = RTSolution_K(ln,m)%Laye
+            r_Optical_Depth(1:Atmosphere(m)%n_Layers)
+      1467            ! ...AAOD adjoint forcing only if requested
+      1468            IF ( Compute_AAOD ) &
+  ⎿  Updated /work/noaa/wrf-chem/pagowski/jedi/code/jedi-bundle/crtm/src/At
+     mScatter/CRTM_AerosolScatter.f90 (+49 -0)
+      287          AScat%Optical_Depth(ka) = AScat%Optical_Depth(ka) + &
+      288                                    (ASV%ke(ka,n)*Atm%Aerosol(n)
+           %Concentration(ka))
+      289  
+      290 +        ! Compute the absorption optical depth (AAOD) if reque
+          +sted                                                          
+      291 +        !   aaod = rho.(1-w).ke                               
+      292 +        ! Note that if scattering is not included, ke has alre
+          +ady been                                                      
+      293 +        ! reduced to the mass absorption coefficient, ke.(1-w)
+          +, in                                                          
+      294 +        ! Get_Aerosol_Opt so the (1-w) factor must not be reap
+          +plied.                                                        
+      295 +        IF ( AScat%Include_AAOD ) THEN                        
+      296 +          IF ( AScat%n_Phase_Elements > 0 .and. AScat%Include_
+          +Scattering ) THEN                                             
+      297 +            AScat%Absorption_Optical_Depth(ka) = AScat%Absorpt
+          +ion_Optical_Depth(ka) + &                                     
+      298 +              ((ONE - ASV%w(ka,n)) * ASV%ke(ka,n) * Atm%Aeroso
+          +l(n)%Concentration(ka))                                       
+      299 +          ELSE                                                
+      300 +            AScat%Absorption_Optical_Depth(ka) = AScat%Absorpt
+          +ion_Optical_Depth(ka) + &                                     
+      301 +              (ASV%ke(ka,n) * Atm%Aerosol(n)%Concentration(ka)
+          +)                                                             
+      302 +          END IF                                              
+      303 +        END IF                                                
+      304 +                                                              
+      305          ! Compute the phase matrix coefficients
+      306          ! p = p + p(LUT)*bs
+      307          ! where
+     ...
+      524          AScat_TL%Optical_Depth(ka) = AScat_TL%Optical_Depth(ka
+           ) + &
+      525                                       (ke_TL        * Atm%Aeros
+           ol(n)%Concentration(ka)) + &
+      526                                       (ASV%ke(ka,n) * Atm_TL%Ae
+           rosol(n)%Concentration(ka))
+      527 +                                                              
+      528 +        ! Compute the absorption optical depth (AAOD) if reque
+          +sted                                                          
+      529 +        IF ( AScat%Include_AAOD ) THEN                        
+      530 +          IF ( n_Phase_Elements > 0 .and. AScat%Include_Scatte
+          +ring ) THEN                                                   
+      531 +            ! ke is the extinction coefficient                
+      532 +            AScat_TL%Absorption_Optical_Depth(ka) = AScat_TL%A
+          +bsorption_Optical_Depth(ka) + &                               
+      533 +              ((ONE - ASV%w(ka,n)) * ke_TL        * Atm%Aeroso
+          +l(n)%Concentration(ka)) + &                                   
+      534 +              ((ONE - ASV%w(ka,n)) * ASV%ke(ka,n) * Atm_TL%Aer
+          +osol(n)%Concentration(ka)) - &                                
+      535 +              (w_TL                * ASV%ke(ka,n) * Atm%Aeroso
+          +l(n)%Concentration(ka))                                       
+      536 +          ELSE                                                
+      537 +            ! ke is already the absorption coefficient        
+      538 +            AScat_TL%Absorption_Optical_Depth(ka) = AScat_TL%A
+          +bsorption_Optical_Depth(ka) + &                               
+      539 +              (ke_TL        * Atm%Aerosol(n)%Concentration(ka)
+          +) + &                                                         
+      540 +              (ASV%ke(ka,n) * Atm_TL%Aerosol(n)%Concentration(
+          +ka))                                                          
+      541 +          END IF                                              
+      542 +        END IF                                                
+     … 27 more lines (ctrl+o to expand)
+
+● All three files are changed. Next I'll compile them by hand, in dependency
+  order, into the scratchpad:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All three compile cleanly with no new errors or warnings. Now I'll verify the
+  numbers by building CRTM standalone with tests disabled.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I've carried the AAOD flag into AtmOptics, so CRTM_Compute_AerosolScatter and
+  its TL and AD now compute AAOD when you pass AAOD=.TRUE.. All three changed
+  files compile with no errors or warnings. I haven't yet run any numerical
+  check (forward values, TL against finite differences, or the adjoint
+  dot-product test), because the full library still can't be rebuilt.
+
+  Changes
+  1. AtmOptics/CRTM_AtmOptics_Define.f90: new field LOGICAL :: Include_AAOD = 
+     .FALSE., next to Include_Scattering. It is also included when two AtmOptics
+     structures are compared.
+  2. AtmScatter/CRTM_AOD_Module.f90: each function sets Include_AAOD = 
+     Compute_AAOD on its AtmOptics structures (AtmOptics and its _TL, _AD or _K
+     partner) at every channel. When the flag is off, CRTM_AerosolScatter.f90
+     now skips the AAOD calculation entirely.
+  3. AtmScatter/CRTM_AerosolScatter.f90: the calculation, in terms of extinction
+     coefficient ke, single scattering albedo w and layer concentration c. It
+     runs only when Include_AAOD is on:
+
+  ┌─────────┬───────────────────────────────────────┬───────────────────────┐
+  │         │  Scattering on (the normal AOD case)  │    Scattering off     │
+  ├─────────┼───────────────────────────────────────┼───────────────────────┤
+  │ Forward │ aaod += (1-w)·ke·c                    │ aaod += ke·c          │
+  ├─────────┼───────────────────────────────────────┼───────────────────────┤
+  │ TL      │ (1-w)(ke_TL·c + ke·c_TL) − w_TL·ke·c  │ ke_TL·c + ke·c_TL     │
+  ├─────────┼───────────────────────────────────────┼───────────────────────┤
+  │ AD      │ c_AD += (1-w)·ke·aaod_AD, ke_AD +=    │ c_AD += ke·aaod_AD,   │
+  │         │ (1-w)·c·aaod_AD, w_AD −= ke·c·aaod_AD │ ke_AD += c·aaod_AD    │
+  └─────────┴───────────────────────────────────────┴───────────────────────┘
+
+  Why the two columns: when scattering is off, Get_Aerosol_Opt has already
+  replaced ke with ke·(1-w), so ASV%ke is the absorption coefficient. Applying
+  (1-w) again would count it twice. The TL and AD lookup routines follow the
+  same convention, so the dependence on w is still carried through correctly in
+  that case.
+
+  Clipping of w and ke: in the AD, the new terms go before the existing clipping
+  step, which zeroes w_AD and ke_AD where the forward code clipped w to [0,1]
+  or zeroed ke. In the TL they come after the matching clipping. So the clipping
+  treats AAOD the same way it treats AOD.
+
+  Still to do
+  - Full rebuild needed: adding a field to CRTM_AtmOptics_type changes that
+    structure, so everything that uses it (CRTM, then UFO) must be recompiled.
+  - CMake is still blocked: test/CMakeLists.txt registers AAOD tests whose
+    test_AAOD.f90 main programs don't exist yet. Until they're written, make in
+    the jedi-bundle build fails at the configure step.
+  - Suggested next step: /crtm_aaod_create_tests. It would write those main
+    programs and run the TL/AD checks with AAOD=.TRUE., and I can also check the
+    forward AAOD against a hand calculation from the lookup-table ke and w.
+
+  Something I noticed but didn't touch: in the existing TL code, when scattering
+  is on, Backscat_Coefficient gets its TL contribution added twice, and the AD
+  adds it only once. If a TL/AD test checks backscatter, it may fail for that
+  reason, which has nothing to do with AAOD.
+
+  Backups of the files as they were before this change are in the scratchpad.
+
+✻ Worked for 2m 7s · done 4:05 PM
+
+※ recap: You're adding Absorption AOD assimilation to CRTM, and it's now calculated whenever you pass AAOD=.TRUE., but nothing has been numerically tested yet. Next is writing the missing test_AAOD programs so the library rebuilds and the TL/adjoint checks can run. (disable recaps in /config)
+
+❯ write test_AAOD programs to test TL and AD                                    
+
+● Skill(crtm_aaod_create_tests)
+  ⎿  Successfully loaded skill
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● The current unit tests mostly just print output and can't actually fail, so
+  I'll convert the AAOD versions into real pass/fail tests. First, I'll check
+  the test data, the CRTM_Init signature, and the GOCART aerosol type indices.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Still reading: I've got the test data location. Next I'll check the aerosol
+  type IDs and which test executables are already built.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I found compiled executables for AerosolScatter_AAOD (TL/AD/K) and their tests
+  in the build's bin directory, but no corresponding source files in the tree.
+  I'll investigate where these came from before making any changes.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The backup tree's AAOD unit tests target an older CRTM_AAOD_Module design, so
+  I'll write fresh tests for the current Include_AAOD / AAOD= API. Next I'll
+  check the aerosol type IDs and how CRTM_Init loads aerosol coefficients.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● No type-name table found, so I'll have the tests include one aerosol of every
+  LUT type to cover both absorbing and non-absorbing cases. Next I'll check the
+  relevant struct fields and procedure signatures.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● I have the setup details. Last check before writing the three test programs:
+  how the aerosol Type maps to the LUT index.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I have everything needed, so I'll write the three test programs, each building
+  a profile with every GOCART-GEOS5 aerosol type (including absorbing types)
+  and stopping with STOP 1 on any mismatch.
+
+● Write(mains/unit/Unit_Test/test_AerosolScatter_AAOD_TL.f90)
+  ⎿  Wrote 273 lines to
+     mains/unit/Unit_Test/test_AerosolScatter_AAOD_TL.f90
+       1 !
+       2 ! test_AerosolScatter_AAOD_TL
+       4 ! Unit test for the aerosol absorption optical depth (AAOD) in
+       5 ! CRTM_Compute_AerosolScatter and CRTM_Compute_AerosolScatter_TL
+         .
+       7 ! The test profile contains one aerosol of every type in the
+       8 ! GOCART-GEOS5 table, so both absorbing and non-absorbing aeroso
+         ls
+      10 !   - with Include_AAOD = .FALSE. the AAOD is zero and the AOD u
+         nchanged
+     … +301 lines (ctrl+o to expand)
+
+● Now the AD test: dot-product tests with scattering on and off, plus a check
+  that the AAOD seed is ignored when the flag is off.
+
+● Write(mains/unit/Unit_Test/test_AerosolScatter_AAOD_AD.f90)
+  ⎿  Wrote 253 lines to
+     mains/unit/Unit_Test/test_AerosolScatter_AAOD_AD.f90
+       1 !
+       2 ! test_AerosolScatter_AAOD_AD
+       3 !
+       4 ! Unit test for the aerosol absorption optical depth (AAOD) in
+       5 ! CRTM_Compute_AerosolScatter_AD.
+       6 !
+       7 ! Verifies adjoint consistency with the tangent linear model,
+       8 !   <TL(dx), y> = <dx, AD(y)>
+       9 ! with scattering on and off, for
+      10 !   - an AAOD-only adjoint input y = AAOD_TL
+     … +283 lines (ctrl+o to expand)
+
+● Now the K test. It goes through the public CRTM_AOD / CRTM_AOD_TL / CRTM_AOD_K
+  interface with AAOD=.TRUE. and compares every Jacobian column against the TL
+  model.
+
+● Write(mains/unit/Unit_Test/test_AerosolScatter_AAOD_K.f90)
+  ⎿  Wrote 258 lines to mains/unit/Unit_Test/test_AerosolScatter_AAOD_K.f90
+       1 !
+       3 !
+       4 ! Unit test for the aerosol absorption optical depth (AAOD) Jaco
+         bians
+       6 !
+       7 ! The adjoint input is the column AAOD, i.e. RTSolution_K%Layer_
+       8 ! in every layer, so Atm_K holds d(column AAOD)/dx for every cha
+         nnel.
+       9 ! The test verifies that
+         AOD
+     … +291 lines (ctrl+o to expand)
+● Now I'll register the three tests in test/CMakeLists.txt, right after the
+  existing AerosolScatter tests:
+
+● Update(CMakeLists.txt)
+  ⎿  Added 19 lines
+      321           COMMAND $<TARGET_FILE:Unit_AerosolScatter_K>)
+      322  set_tests_properties(test_Unit_AerosolScatter_K PROPERTIES ENV
+           IRONMENT "OMP_NUM_THREADS=$ENV{OMP_NUM_THREADS}")
+      323  
+      324 +# Absorption AOD (AAOD) unit tests                            
+      325 +add_executable(Unit_AerosolScatter_AAOD_TL mains/unit/Unit_Tes
+          +t/test_AerosolScatter_AAOD_TL.f90)                            
+      326 +target_link_libraries(Unit_AerosolScatter_AAOD_TL PRIVATE crtm
+          +)                                                             
+      327 +add_test(NAME test_Unit_AerosolScatter_AAOD_TL                
+      328 +         COMMAND $<TARGET_FILE:Unit_AerosolScatter_AAOD_TL>)  
+      329 +set_tests_properties(test_Unit_AerosolScatter_AAOD_TL PROPERTI
+          +ES ENVIRONMENT "OMP_NUM_THREADS=$ENV{OMP_NUM_THREADS}")       
+      330 +                                                              
+      331 +add_executable(Unit_AerosolScatter_AAOD_AD mains/unit/Unit_Tes
+          +t/test_AerosolScatter_AAOD_AD.f90)                            
+      332 +target_link_libraries(Unit_AerosolScatter_AAOD_AD PRIVATE crtm
+          +)                                                             
+      333 +add_test(NAME test_Unit_AerosolScatter_AAOD_AD                
+      334 +         COMMAND $<TARGET_FILE:Unit_AerosolScatter_AAOD_AD>)  
+      335 +set_tests_properties(test_Unit_AerosolScatter_AAOD_AD PROPERTI
+          +ES ENVIRONMENT "OMP_NUM_THREADS=$ENV{OMP_NUM_THREADS}")       
+      336 +                                                              
+      337 +add_executable(Unit_AerosolScatter_AAOD_K mains/unit/Unit_Test
+          +/test_AerosolScatter_AAOD_K.f90)                              
+      338 +target_link_libraries(Unit_AerosolScatter_AAOD_K PRIVATE crtm)
+      339 +add_test(NAME test_Unit_AerosolScatter_AAOD_K                 
+      340 +         COMMAND $<TARGET_FILE:Unit_AerosolScatter_AAOD_K>)   
+      341 +set_tests_properties(test_Unit_AerosolScatter_AAOD_K PROPERTIE
+          +S ENVIRONMENT "OMP_NUM_THREADS=$ENV{OMP_NUM_THREADS}")        
+      342 +                                                              
+      343  add_executable(Unit_Aerosol_Bypass_TL mains/unit/Unit_Test/tes
+           t_Aerosol_Bypass_TL.f90)
+      344  target_link_libraries(Unit_Aerosol_Bypass_TL PRIVATE crtm)
+      345  add_test(NAME test_Unit_Aerosol_Bypass_TL
+
+● I'll build libcrtm using the existing generated Makefiles to bypass the CMake
+  regeneration issue caused by missing test_AAOD.f90 mains, then compile the
+  three tests manually.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Rebuilt libcrtm.so with the AAOD code. Next I'll compile the three tests using
+  the existing unit test flags/link line and run them from the test directory,
+  since they read from ./testinput/.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Fortran names are case-insensitive, so the subroutine Column_TL clashes with
+  the array column_TL. I'll rename the subroutine:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All three compile cleanly with -warn all. Running them now:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All three pass. Now I'll recompile the existing AOD unit tests against the
+  rebuilt library, since the old binaries used the previous AtmOptics layout.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I wrote the three AAOD unit tests and registered them in test/CMakeLists.txt.
+  All three pass against a rebuilt libcrtm.so, and the existing AOD tests still
+  pass. I had to compile and run the tests by hand, though, because CMake can't
+  regenerate yet (explained below).
+
+  Test setup. Each test puts all 19 aerosol types from the GOCART-GEOS5 table
+  into the profile, so strongly and weakly absorbing aerosols are both covered.
+  The relative humidities are chosen to fall between the table's RH points.
+  Unlike the existing AOD tests, which only print values, these call STOP 1 if
+  any check fails.
+
+  test_Unit_AerosolScatter_AAOD_TL (test_AerosolScatter_AAOD_TL.f90)
+  - Flag off: with Include_AAOD off, AAOD is exactly zero and AOD is bit-for-bit
+    unchanged.
+  - Forward value: forward AAOD equals Σ(1-w)·ke·ρ computed from the table
+    values, and AAOD ≤ AOD.
+  - Scattering on/off: AAOD is the same either way, and with scattering off AAOD
+    = AOD. This confirms the (1-w) factor isn't applied twice.
+  - TL vs finite difference: TL matches a central finite difference, with
+    relative error about 1e-11 for concentration and 1e-9 for RH, with
+    scattering on and off.
+
+  test_Unit_AerosolScatter_AAOD_AD (test_AerosolScatter_AAOD_AD.f90)
+  - Dot-product test: checks that the AD is the exact transpose of the TL. It
+    passes to about 1e-15 with scattering on and off.
+    - It runs once with only the AAOD adjoint input set.
+    - It runs again with AAOD, AOD, SSA, asymmetry factor and phase coefficients
+      all set together.
+  - Flag off: with the flag off, an AAOD adjoint input has no effect.
+
+  test_Unit_AerosolScatter_AAOD_K (test_AerosolScatter_AAOD_K.f90), which calls
+  CRTM_AOD, CRTM_AOD_TL and CRTM_AOD_K directly with the AAOD= flag:
+  - Flag off: AAOD=.FALSE. gives zero AAOD and unchanged AOD.
+  - Jacobians vs TL: every column-AAOD Jacobian element (16 channels × 5 layers
+    × 19 aerosols for concentration, plus RH) matches the TL. The largest
+    difference is 7.6e-15 on values up to about 1e3.
+  - Linearity: column AAOD = Σ ρ·∂AAOD/∂ρ, as it should since AAOD is linear in
+    concentration. Relative difference is 2e-16.
+  - Flag off in K: AAOD=.FALSE. ignores the AAOD adjoint input.
+
+  Why I built by hand. make stops at the CMake step because the regression tests
+  (test_AAOD for forward, TL, AD and K-matrix) are registered in
+  test/CMakeLists.txt but their test_AAOD.f90 files don't exist yet. To get
+  around that:
+  - I rebuilt libcrtm.so in your build tree through the existing generated
+    Makefiles, which skip that step.
+  - I compiled the tests into my scratchpad using the same flags the existing
+    unit tests use.
+
+  So ctest won't pick up these tests until CMake can regenerate. Either the four
+  regression mains get written, or AAOD is temporarily removed from the
+  common_tests and TLAD_tests lists.
+
+  Other things to know
+  - Stale binaries: the old Unit_AerosolScatter_AAOD_* files in
+    build/jedi-bundle/bin (dated Sep 25) came from an earlier attempt and are
+    not these tests.
+  - Rebuild UFO: libcrtm.so now has the new AtmOptics layout, so UFO needs
+    rebuilding before you run anything that uses it.
+  - Earlier attempt: an earlier AAOD attempt with a different design (a separate
+    CRTM_AAOD_Module) is in jedi-bundle_backup/. I didn't use any of it.
+
+✻ Crunched for 14m 6s · done 4:24 PM
+
+※ recap: You're adding absorption AOD (AAOD) to CRTM, and the new AAOD unit tests for TL, AD and K-matrix are written and passing. Next, write the four missing regression `test_AAOD.f90` programs (or drop AAOD from those test lists) so CMake and ctest work again. (disable recaps in /config)
+
+❯ did you ran TL, AD, K tests for AOD and AAOD and they passed                  
+
+● Yes, I ran all six and all six passed. I ran them by hand, not through ctest:
+  the executables are in my scratchpad and were run from
+  build/jedi-bundle/crtm/test, linked against the rebuilt libcrtm.so.
+
+  ┌──────────────┬────────┬─────────────────────────────────────────────────┐
+  │     Test     │ Result │             What it actually checks             │
+  ├──────────────┼────────┼─────────────────────────────────────────────────┤
+  │              │        │ Forward AAOD matches Σ(1-w)·ke·ρ; flag off      │
+  │ AAOD TL      │ Pass   │ gives zero AAOD and unchanged AOD; TL matches a │
+  │              │        │  finite difference to about 1e-9 or better      │
+  ├──────────────┼────────┼─────────────────────────────────────────────────┤
+  │ AAOD AD      │ Pass   │ Dot-product (TL vs adjoint) test agrees to      │
+  │              │        │ about 1e-15, with scattering on and off         │
+  ├──────────────┼────────┼─────────────────────────────────────────────────┤
+  │              │        │ Every Jacobian matches the TL to 7.6e-15        │
+  │ AAOD K       │ Pass   │ (absolute, on values up to about 1e3); flag off │
+  │              │        │  ignores the AAOD input                         │
+  ├──────────────┼────────┼─────────────────────────────────────────────────┤
+  │ AOD TL       │ Pass   │ Only that the TL is non-zero for RH and         │
+  │ (existing)   │        │ concentration                                   │
+  ├──────────────┼────────┼─────────────────────────────────────────────────┤
+  │ AOD AD       │ Pass   │ Dot-product test, relative difference 0         │
+  │ (existing)   │        │                                                 │
+  ├──────────────┼────────┼─────────────────────────────────────────────────┤
+  │ AOD K        │ Pass   │ Only that the RH Jacobians are non-zero         │
+  │ (existing)   │        │                                                 │
+  └──────────────┴────────┴─────────────────────────────────────────────────┘
+
+  The existing AOD TL and K tests are weak: they only check that the
+  sensitivities are non-zero, not that they're correct. Only the AOD AD test is
+  a real accuracy test.
+
+  What I did not run:
+  - Through ctest: CMake still can't regenerate while the regression
+    test_AAOD.f90 files are missing, so the new test names aren't registered
+    with CTest yet.
+  - The regression tests: the full-model regression tests
+    (test_forward_test_AOD, test_k_matrix_test_AOD, and the other test_*
+    programs) haven't been run against the rebuilt library.
+  - The rest of the unit tests: I ran only the three AerosolScatter ones for
+    each of AOD and AAOD.
+
+  If you'd like, I can make CMake configure again, either by writing the missing
+  regression mains or by temporarily dropping AAOD from those test lists. Then
+  I'd run the whole CRTM suite with ctest to check that nothing else broke.
+
+✻ Cogitated for 9s · done 4:35 PM
+
+❯ write the missing AAOD tests and run ctests                                   
+
+● I'll start by looking at how the regression tests are wired up and what the
+  existing AOD mains look like.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● AOD only has forward and k_matrix regression mains, but AAOD also needs
+  tangent_linear and adjoint mains since it's listed in TLAD_tests. I'll read
+  the existing AOD mains and the AAOD_Utils.inc helper next.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+● AAOD_Utils.inc already has CRTM init, RH profile, perturbation, dot-product,
+  and regression-file helpers I can build on. Next I'll check the sensor list,
+  results directory setup, and whether Load_Atm_Data.inc sets RH.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Found existing AAOD reference files in results/ from a Sep 25 attempt,
+  including .AAOD.bin, .AAOD_TL.bin, .AAOD_AD.bin, and Atmosphere.bin. I'll
+  check the backups for the matching main programs that generated them.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● crtm_forward_tl_ad_2 includes all four mains, with saved results dated Sep 25
+  around 18:51–18:55. I'll now check which API these mains use and whether it's
+  compatible with the current AAOD_Utils.inc.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The backup mains rely on the same AAOD_Utils.inc but predate the AAOD= flag,
+  always computing AAOD by default. I'll write new mains for the current API,
+  matching the old saved-file layout so existing reference results can
+  cross-check the implementation—next I'll check what arrays the old mains
+  saved.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The forward and K-matrix references only depend on the profile, so if the new
+  code reproduces them, that validates this implementation against the earlier
+  one—though the TL/AD references may need regenerating since they depend on old
+  perturbation choices. I'll verify a couple facts next, then write the four
+  main scripts.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The forward test uses the profile as-is since Load_Atm_Data.inc doesn't set
+  RH, matching the AOD forward test's approach, while TL/AD/K tests will call
+  Set_Interior_RH to keep finite differences away from the table's RH points.
+  Now writing the forward main.
+
+● Write(mains/regression/forward/test_AAOD/test_AAOD.f90)
+  ⎿  Wrote 265 lines to mains/regression/forward/test_AAOD/test_AAOD.f90
+       1 !
+       2 ! test_AAOD
+       4 ! Test program for the CRTM Absorption Aerosol Optical Depth (AA
+         OD)
+       5 ! computed by the AOD Forward function, CRTM_AOD, with AAOD = .T
+       6 !
+       7 ! Checks that
+       8 !   - without the AAOD flag the AAOD is zero and the AOD is unch
+       9 !   - 0 <= AAOD <= AOD in every layer, and AAOD is non-zero
+      10 !   - the layer AAOD agrees with the saved regression values.
+     … +301 lines (ctrl+o to expand)
+
+● Now I'll run the TL main test, verifying it against a central finite
+  difference across three perturbation directions, confirming the AOD TL stays
+  unchanged and AAOD TL is zero without the flag, and saving the regression
+  values.
+
+● Bash(cd /work/noaa/wrf-chem/pagowski/jedi/code/jedi-bundle/crtm/test/mains/reg
+      ression; cp tangent_linear/test_AAOD/AAOD_Utils.inc
+      forward/test_AAOD/AAOD_Utils.inc; l…)
+  ⎿  AAOD_Utils.inc
+     Load_Atm_Data.inc
+     test_AAOD.f90
+  ⎿  Created mains/regression/forward/test_AAOD/AAOD_Utils.inc (+204 -0)
+        1 +!                                                             
+        2 +! AAOD_Utils.inc                                              
+        3 +!                                                             
+        4 +! Helper procedures shared by the Absorption Aerosol Optical D
+          +epth (AAOD)                                                   
+        5 +! regression tests (forward, tangent_linear, adjoint, k_matrix
+          +).                                                            
+        6 +!                                                             
+        7 +! Included after CONTAINS in the test programs; relies on host
+          + association                                                  
+        8 +! for PROGRAM_NAME and COEFFICIENTS_PATH, and on CRTM_Module b
+          +eing USEd.                                                    
+        9 +!                                                             
+       10 +! NOTE: the test profiles in Load_Atm_Data.inc use the legacy 
+          +CRTM aerosol                                                  
+       11 +!       type IDs. With the GOCART-GEOS5 table these IDs index 
+          +the LUT                                                       
+       12 +!       entries: 1 -> "Dust 1", 8 -> "Sea salt 3", 5 -> "Dust 
+          +5".                                                           
+       13 +!                                                             
+       14 +                                                              
+       15 +  ! Initialise the CRTM with the GOCART-GEOS5 aerosol table, u
+          +sing the                                                      
+       16 +  ! same coefficient file selection as the AOD tests.         
+       17 +  SUBROUTINE Init_AAOD_CRTM( Sensor_Id, ChannelInfo )         
+       18 +    CHARACTER(*)               , INTENT(IN)     :: Sensor_Id  
+       19 +    TYPE(CRTM_ChannelInfo_type), INTENT(IN OUT) :: ChannelInfo
+          +(:)                                                           
+       20 +    CHARACTER(256) :: AerosolCoeff_File                       
+       21 +    LOGICAL :: has_new_coeff, has_old_coeff                   
+       22 +    INTEGER :: err                                            
+       23 +    has_new_coeff = File_Exists(COEFFICIENTS_PATH//'AerosolCoe
+          +ff.GOCART-GEOS5.BRC.kb.v2.nc')                                
+       24 +    has_old_coeff = File_Exists(COEFFICIENTS_PATH//'AerosolCoe
+          +ff.GOCART-GEOS5.nc4')                                         
+       25 +    IF ( has_new_coeff ) THEN                                 
+       26 +      AerosolCoeff_File = 'AerosolCoeff.GOCART-GEOS5.BRC.kb.v2
+          +.nc'                                                          
+       27 +    ELSE                                                      
+       28 +      AerosolCoeff_File = 'AerosolCoeff.GOCART-GEOS5.nc4'     
+       29 +    END IF                                                    
+       30 +    err = CRTM_Init( (/Sensor_Id/), &                         
+       31 +                     ChannelInfo, &                           
+       32 +                     Aerosol_Model = 'GOCART-GEOS5', &        
+       33 +                     AerosolCoeff_Format = 'netCDF', &        
+       34 +                     AerosolCoeff_File = TRIM(AerosolCoeff_Fil
+          +e), &                                                         
+       35 +                     File_Path=COEFFICIENTS_PATH)             
+       36 +    IF ( err /= SUCCESS .AND. has_old_coeff .AND. TRIM(Aerosol
+          +Coeff_File) /= 'AerosolCoeff.GOCART-GEOS5.nc4' ) THEN         
+       37 +      AerosolCoeff_File = 'AerosolCoeff.GOCART-GEOS5.nc4'     
+       38 +      err = CRTM_Init( (/Sensor_Id/), &                       
+       39 +                       ChannelInfo, &                         
+       40 +                       Aerosol_Model = 'GOCART-GEOS5', &      
+     … 164 more lines (ctrl+o to expand)
+● Write(mains/regression/tangent_linear/test_AAOD/test_AAOD.f90)
+  ⎿  Wrote 310 lines to
+     mains/regression/tangent_linear/test_AAOD/test_AAOD.f90
+       1 !
+       3 !
+       4 ! Test program for the CRTM Absorption Aerosol Optical Depth (AA
+         OD)
+         ith
+       6 ! AAOD = .TRUE.
+       8 ! Checks that
+       9 !   - the layer AAOD TL agrees with a central finite difference 
+         of the
+         n, the
+     … +360 lines (ctrl+o to expand)
+
+● Now the adjoint main: dot-product tests with an AAOD-only seed and a combined
+  AOD+AAOD seed, a check that the AAOD seed is ignored without the flag, and a
+  regression file.
+
+● Write(mains/regression/adjoint/test_AAOD/test_AAOD.f90)
+  ⎿  Wrote 311 lines to mains/regression/adjoint/test_AAOD/test_AAOD.f90
+       1 !
+       2 ! test_AAOD
+       4 ! Test program for the CRTM Absorption Aerosol Optical Depth (AA
+         OD)
+       5 ! adjoint computed by the AOD AD function, CRTM_AOD_AD, with AAO
+       6 !
+       7 ! Checks that
+       8 !   - the adjoint is consistent with the tangent linear,
+      10 !     for an AAOD-only adjoint input y = AAOD_TL, and for a comb
+         ined
+     … +352 lines (ctrl+o to expand)
+
+● Now I'll check the K-matrix main test, verifying column-AAOD Jacobians against
+  the TL along a perturbation direction, confirming the linearity identity,
+  checking the seed is ignored without the flag, and comparing Atmosphere_K
+  against the saved file—mirroring the AOD K test approach.
+
+● Write(mains/regression/k_matrix/test_AAOD/test_AAOD.f90)
+  ⎿  Wrote 402 lines to mains/regression/k_matrix/test_AAOD/test_AAOD.f90
+       1 !
+       3 !
+       4 ! Test program for the CRTM Absorption Aerosol Optical Depth (AA
+         OD)
+         ith
+       6 ! AAOD = .TRUE.
+       8 ! The K-matrix input is the column AAOD, RTSolution_K%Layer_Abso
+         rption_Optical_Depth = 1,
+       9 ! so Atmosphere_K holds d(column AAOD)/dx for every channel and 
+      10 ! Checks that
+     … +455 lines (ctrl+o to expand)
+
+● All four mains are written. Next I'll regenerate CMake (it should succeed now
+  that the sources exist) and build everything under crtm/:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Everything builds, and the new AAOD binaries are freshly linked (16:47). Now
+  the AAOD tests through ctest. The regression checks will run against the
+  reference files left from the earlier attempt:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Forward and K-matrix tests pass, matching saved references as a solid
+  cross-check, but 10 TL/AD tests failed, some in just 0.08s. I'll dig into why
+  each one is failing.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Both failures trace to test setup rather than the AAOD code: the adjoint
+  failure comes from a stale reference file that needs regenerating, and the TL
+  failure comes from an overly strict per-element tolerance near-zero AAOD
+  layers. I'll first verify the RH mismatch is finite-difference truncation
+  error by checking if it shrinks as h² across three step sizes before relaxing
+  the TL check.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The error scaling confirms O(h²) convergence, so the TL is correct—the
+  per-element check was just too strict for near-zero AAOD layers. I'll switch
+  to the standard normalized criterion (max|TL−FD| ≤ 1e-5·max|TL|), which the
+  results satisfy with plenty of margin.
+
+● Update(mains/regression/tangent_linear/test_AAOD/test_AAOD.f90)
+  ⎿  Added 4 lines, removed 2 lines
+      207        END DO
+      208      END DO
+      209  
+      210 -    ! 5c. Compare, with an absolute floor for layers with ~zer
+          -o AAOD TL                                                     
+      211 -    ! --------------------------------------------------------
+          ----------                                                     
+      210 +    ! 5c. Compare, relative to the largest TL. The central dif
+          +ference                                                       
+      211 +    !     error is O(FD_STEP**2) (from the RH interpolation), 
+          +so an                                                         
+      212 +    !     element-wise relative check is too strict for layers
+          + with ~zero TL                                                
+      213 +    ! --------------------------------------------------------
+          +---------------                                               
+      214      tl_scale = MAXVAL(ABS(aaod_tl))
+      215      max_rel_err = MAXVAL(ABS(aaod_tl - aaod_fd)) / MAX(tl_scal
+           e, TINY(ONE))
+      216      WRITE( *,'(/5x,"Perturbation: ",a)' ) TRIM(DIRECTION_NAME(
+           id))
+
+● Update(mains/regression/tangent_linear/test_AAOD/test_AAOD.f90)
+  ⎿  Added 1 line, removed 1 line
+      219      IF ( tl_scale <= ZERO ) THEN
+      220        CALL Display_Message( PROGRAM_NAME, 'AAOD TL is zero for
+            '//TRIM(DIRECTION_NAME(id)), FAILURE )
+      221        Passed = .FALSE.
+      222 -    ELSE IF ( .NOT. ALL(Agrees(aaod_tl, aaod_fd, FD_RTOL, 1.0e
+          --3_fp*tl_scale)) ) THEN                                       
+      222 +    ELSE IF ( max_rel_err > FD_RTOL ) THEN                    
+      223        CALL Display_Message( PROGRAM_NAME, 'AAOD TL differs fro
+           m finite difference for '// &
+      224                              TRIM(DIRECTION_NAME(id)), FAILURE 
+           )
+      225        Passed = .FALSE.
+
+● Rebuilding and rerunning now — since test_tangent_linear_AAOD_abi_g18 and
+  cris399_npp already passed regression, the TL references match; I expect only
+  the AD references, which use a different array layout, to still fail.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The TL binary wasn't rebuilt: it still has the 16:47 timestamp, because that
+  target name doesn't exist in the crtm/ subdirectory Makefile. I'll rebuild the
+  whole crtm/ tree instead:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All 6 TL tests pass now. I'll confirm they really compared against the old
+  saved references rather than creating new ones:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Forward, TL, and K-matrix results match the earlier saved references within
+  tolerance, confirming independent correctness. Now I'll decode the small
+  52-byte AD reference file to check if it's comparable with the new dot
+  products.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The old AD references aren't comparable since the new test checks full adjoint
+  fields instead of the old dot-product values, so I'll move the six old
+  reference files to a backup folder and let the new test generate fresh ones.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All AAOD tests pass now. Next, the full CRTM suite, to check that nothing else
+  broke:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The full suite ran 223 tests: 211 passed and 12 failed. The failures are all
+  the existing AOD forward and K-matrix regression tests, and they need looking
+  at. I'll get the details:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The AOD tests are segfaulting at CRTM_AOD_Module.f90 lines 193 and 1279, both
+  calls made without optional arguments—a real bug. Let me examine those lines.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The crash at PRESENT(AAOD) is likely caused by stale test_AOD objects compiled
+  against the old 4-argument interface before relinking. I'll check the object
+  file timestamps to confirm.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The test_AOD objects are stale (from Sep 25) despite crtm_aod_module.mod being
+  updated today—CMake missed the rebuild since the library was built directly
+  via Makefile2, so these binaries still use the old CRTM_AOD interface. This
+  likely affects UFO's compiled objects too; I'll list all stale CRTM test
+  objects to confirm.
+  Ran 1 shell command (ctrl+o to expand)
+
+● I found 69 stale test objects, with only 10 freshly compiled against the
+  updated interfaces. I'll delete the stale build output, rebuild everything,
+  and rerun the full test suite.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Every test object is now recompiled against the current modules. Running the
+  full CRTM suite again:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All 223 CRTM tests pass, including the 27 AAOD tests. The last question is
+  whether UFO calls the changed routines, since its objects could be stale in
+  the same way:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I wrote the four missing AAOD regression tests, and the full CRTM ctest suite
+  now passes: 223 of 223 tests, including all 27 AAOD tests. Getting there
+  needed a few fixes, listed below. UFO also needs a rebuild before you run it —
+  details at the end.
+
+  New programs (in test/mains/regression/<type>/test_AAOD/test_AAOD.f90, using
+  the existing AAOD_Utils.inc and Load_Atm_Data.inc):
+  - forward: checks that CRTM_AOD without the flag gives zero AAOD and unchanged
+    AOD, that 0 ≤ AAOD ≤ AOD in every layer, and compares against saved
+    results.
+  - tangent_linear: compares the TL with a central finite difference for
+    concentration, RH and both together; checks that without the flag the AAOD
+    TL is zero and the AOD TL unchanged; compares against saved results.
+  - adjoint: a dot-product test with an AAOD-only input and with AOD+AAOD
+    (relative error about 1e-15); checks that the AAOD input is ignored without
+    the flag; compares against saved results.
+  - k_matrix: checks that the Jacobians times a perturbation equal the column
+    AAOD TL for every channel, that column AAOD = Σ(concentration × its
+    Jacobian), and that the flag-off input is ignored; compares against saved
+    results.
+  - Helper copy: I put a copy of AAOD_Utils.inc into forward/test_AAOD/, because
+    the forward test includes it.
+
+  Independent cross-check. The forward, TL and K-matrix results match the
+  reference files left in results/ by your earlier AAOD attempt from Sep 25, to
+  1e-10. That was separate code, so it's good confirmation.
+
+  Problems found and fixed along the way
+  1. TL tolerance was too strict. My check compared each layer separately, and
+     failed on layers where AAOD is nearly zero. With step sizes 1e-3, 1e-4 and
+     1e-5, the error falls 100× for each 10× smaller step. That's the normal
+     finite-difference error, so the TL is correct. I changed the check to
+     max|TL−FD| ≤ 1e-5·max|TL|; the worst case is 3.8e-7.
+  2. Old adjoint references were incompatible. They stored three dot-product
+     values computed with different adjoint inputs. I moved them to
+     results/adjoint/old_AAOD_refs_2026-09-25/ rather than deleting them, and
+     the test created new ones. It passes on a second run, which is the run that
+     actually compares against them.
+  3. The existing AOD tests segfaulted. Their objects were compiled on Sep 25
+     against the old CRTM_AOD interface. My earlier library-only build meant
+     CMake never recompiled them after I added the AAOD argument. I deleted all
+     69 stale CRTM test objects and rebuilt, and then everything passed.
+
+  UFO needs a rebuild. Its AOD operators (ufo_aodcrtm_mod.F90 and
+  ufo_aodcrtm_tlad_mod.F90) call CRTM_AOD, CRTM_AOD_TL, CRTM_AOD_AD and
+  CRTM_AOD_K. Their object files date from Sep 25, so they would crash the same
+  way at run time. ufo_extcoeffprofcrtm_mod.F90 also calls one of these
+  routines, but I didn't find a matching object file to check. Delete UFO's CRTM
+  operator objects (or do a clean UFO build) before running any AOD observation
+  operator, because incremental make may not recompile them. I haven't rebuilt
+  UFO yet — want me to?
+
+✻ Cooked for 15m 51s · done 4:55 PM
+
+❯ for get about ufo                                                             
+
+● Got it, I'll leave UFO alone. The CRTM side is finished: all 223 CRTM tests
+  pass, including the 27 new AAOD tests.
+
+✻ Churned for 1s · done 4:56 PM
+
+❯ /export                                                                       
+  ⎿  Conversation exported to: /work/noaa/wrf-chem/pagowski/jedi/code/jedi-bundl
+     e/2026-09-26-165909-command-messagecrtmaaodintrocommand-message.txt
+
+❯ I am not happy with mulitple changes. I want to go back to the original code. 
+  I will replace the current code with the original code. I want to test        
+  another solution.                                                             
+
+● Understood. Here's everything I changed, so you can restore the original
+  completely.
+
+  Source files I edited (under jedi-bundle/crtm/):
+  - src/AtmOptics/CRTM_AtmOptics_Define.f90: added Include_AAOD.
+  - src/AtmScatter/CRTM_AOD_Module.f90: added the AAOD flag.
+  - src/AtmScatter/CRTM_AerosolScatter.f90: added the AAOD forward/TL/AD code.
+  - test/CMakeLists.txt: added the three Unit_AerosolScatter_AAOD_* tests.
+
+  Three of these files (CRTM_AtmOptics_Define.f90, CRTM_AOD_Module.f90 and
+  test/CMakeLists.txt) already had your own uncommitted AAOD changes before I
+  started. git checkout would remove those as well as mine. Copies of the files
+  as they were before my edits are in the scratchpad
+  (/tmp/claude-8190/.../scratchpad/*.bak). Note that CRTM_AOD_Module.f90.bak was
+  saved after my first edit (the flag); the earlier copy is
+  CRTM_AOD_Module.f90.bak from the first step. Because of that ambiguity, your
+  own backup of the original code is safer.
+
+  Files I created:
+  - test/mains/unit/Unit_Test/test_AerosolScatter_AAOD_{TL,AD,K}.f90
+  - test/mains/regression/{forward,tangent_linear,adjoint,k_matrix}/test_AAOD/te
+    st_AAOD.f90
+  - test/mains/regression/forward/test_AAOD/AAOD_Utils.inc
+
+  Build directory (build/jedi-bundle/):
+  - I rebuilt lib/libcrtm.so and the CRTM test binaries, and deleted 69 stale
+    test object files. Everything there gets rebuilt from whatever source you
+    put back.
+  - I moved the old AAOD adjoint reference files to
+    crtm/test/results/adjoint/old_AAOD_refs_2026-09-25/. Move them back if your
+    other solution uses them.
+  - The new AAOD adjoint references I generated are in
+    crtm/test/results/adjoint/test_AAOD_*.AAOD_AD.bin. Delete them if you don't
+    want them.
+
+  After you restore the source, run make in build/jedi-bundle. It will re-run
+  CMake and recompile. If the test_AAOD.f90 mains are gone but
+  test/CMakeLists.txt still lists AAOD, the configure step will fail again, as
+  it did at the start.
+
+✻ Brewed for 12s · done 5:02 PM
+
+※ recap: You're adding AAOD assimilation to CRTM and are now reverting my changes to try another solution. Next, restore the original source files, then run make in build/jedi-bundle to rebuild.
+
+❯ I restored original files in ./crtm                                           
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I checked, and the crtm source tree is clean: git status shows no changes, and
+  nothing in src/ or test/CMakeLists.txt mentions AAOD or
+  Absorption_Optical_Depth.
+
+  Leftovers from my work remain in the build directory (build/jedi-bundle):
+  - Library and test programs: lib/libcrtm.so and the test executables still
+    contain my version until you rebuild with make.
+  - Reference files: crtm/test/results/ still has the AAOD files. That's the old
+    ones in adjoint/old_AAOD_refs_2026-09-25/, the new
+    adjoint/test_AAOD_*.AAOD_AD.bin, and the Sep 25 forward, TL and K-matrix
+    references. Clear these out if your new solution should start from clean
+    references.
+
+  Ready when you want to start on the other solution.
+
+✻ Worked for 9s · done 5:07 PM
+
+※ recap: You're adding AAOD assimilation to CRTM. You rejected my version and restored the original crtm source, which is now clean, to try a different solution. Next, rebuild and clear the leftover AAOD reference files in build/jedi-bundle/crtm/test/results.
+
+❯ /crtm_aaod_intro                                                              
+  ⎿  2 skills available
+
+● I'll check the code paths your plan depends on: the GOCART-GEOS5 branches in
+  forward/TL/AD, how Include_Scattering gets reset, and how the AOD module sets
+  up AtmOptics.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Yes, this is possible and it will work for GOCART-GEOS5. The existing code
+  already handles the "scattering off" case correctly in the forward, TL and AD
+  paths, so your change can stay inside CRTM_AOD_Module.f90. I only read the
+  code this time and changed nothing.
+
+  Why it works
+
+  With Include_Scattering = .FALSE., the GOCART-GEOS5 branch of each routine
+  already switches from extinction to absorption, and each one is consistent
+  with the others:
+
+  ┌───────────────────────┬─────────────────────┬──────────────────────────┐
+  │        Routine        │ GOCART-GEOS5 code   │          Effect          │
+  │                       │  (scattering off)   │                          │
+  ├───────────────────────┼─────────────────────┼──────────────────────────┤
+  │ Forward,              │                     │ Optical_Depth = Σ        │
+  │ Get_Aerosol_Opt (line │ ke = ke*(1-w)       │ ke·(1-w)·c, which is     │
+  │  968)                 │                     │ AAOD                     │
+  ├───────────────────────┼─────────────────────┼──────────────────────────┤
+  │ TL,                   │                     │ Exact derivative of      │
+  │ Get_Aerosol_Opt_TL    │ ke_TL = ke_TL*(1-w) │ ke_ext·(1-w), since      │
+  │ (line 1239)           │  - ke/(1-w)*w_TL    │ ke/(1-w) is the          │
+  │                       │                     │ extinction coefficient   │
+  ├───────────────────────┼─────────────────────┼──────────────────────────┤
+  │ AD,                   │ w_AD -=             │ Exact transpose of the   │
+  │ Get_Aerosol_Opt_AD    │ ke/(1-w)*ke_AD,     │ TL line                  │
+  │ (lines 1513–1514)     │ ke_AD = ke_AD*(1-w) │                          │
+  └───────────────────────┴─────────────────────┴──────────────────────────┘
+
+  - RH dependence: w_TL and w_AD go through the RH interpolation, so the
+    dependence of the single scattering albedo on RH is included.
+  - Clipping of w and ke: the existing clipping (a negative ke is set to zero, w
+    is limited to [0,1]) is applied the same way in the forward, TL and AD
+    code, so it stays consistent.
+  - K-matrix: CRTM_AOD_K uses the same AD routine, so it works too.
+  - Evidence from the earlier session: the scattering-off path was already
+    exercised with the GOCART-GEOS5 table.
+    - In forward, Optical_Depth matched Σ(1-w)·ke·c to 1e-12.
+    - The TL matched finite differences.
+    - The dot-product test that included Optical_Depth passed to about 1e-15.
+
+    That path is the original code you've restored, not code I added.
+
+  What the implementation needs to get right
+
+  1. Set the flag after CRTM_AtmOptics_Create. Create calls Destroy whenever it
+     reallocates. Destroy resets Include_Scattering to its default, .TRUE.. Zero
+     doesn't touch it. So set it after each Create, in all four functions.
+  2. Set it on both structures in each pair. The routines read the flag from
+     different structures:
+     - forward reads AtmOptics;
+     - TL reads AtmOptics and AtmOptics_TL;
+     - AD and K read AtmOptics plus AtmOptics_AD or AtmOptics_K.
+
+     Setting only one of each pair would mix extinction and absorption. For
+     example: AtmOptics%Include_Scattering = .NOT. Compute_AAOD, and the same
+     for _TL, _AD and _K.
+  3. One quantity per call. AAOD comes back in Layer_Optical_Depth, so getting
+     AOD and AAOD takes two calls, one with the flag and one without.
+
+  Minor caveats (not blocking)
+  - Backscatter output in AAOD mode:
+    - The forward backscatter sum sits inside the scattering block, so
+      Backscat_Coefficient is zero.
+    - The TL computes backscatter outside that block, so the TL backscatter is
+      non-zero while the forward is zero.
+    - Treat backscatter output from an AAOD call as meaningless. AOD and AAOD
+      are unaffected.
+  - A GOCART AD quirk: the backscatter interpolation adjoint (kb_AD) runs twice,
+    at about lines 1519 and 1543. This is harmless here, because the AOD module
+    never feeds in a backscatter adjoint, so kb_AD = 0.
+  - Negative w would give a slightly wrong TL. If the table interpolation ever
+    produced w < 0, the forward would use the raw w for ke·(1-w), but the TL/AD
+    would use the clipped w = 0. That's unlikely with the GOCART-GEOS5 table.
+
+  Want me to implement it, meaning the AAOD flag in the four functions plus
+  setting Include_Scattering on each pair?
+
+✻ Crunched for 1m 9s · done 6:05 PM
+
+❯ why AtmOptics rather than AtmScatter                                          
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● There's only one structure involved. AtmOptics, AScat and AerosolScatter are
+  three local names for the same object, which has type CRTM_AtmOptics_type:
+
+  - In CRTM_AOD_Module.f90, the variable is declared as
+    TYPE(CRTM_AtmOptics_type) :: AtmOptics (lines 165, 471 and 809).
+  - In CRTM_Compute_AerosolScatter / _TL / _AD, AtmOptics arrives as the
+    argument AScat (or AScat_TL, AScat_AD), also declared
+    TYPE(CRTM_AtmOptics_type) (lines 181, 425–429 and 645–646).
+  - Get_Aerosol_Opt receives the same structure again and calls it
+    AerosolScatter. That's where AerosolScatter%Include_Scattering is read and
+    ke = ke*(1-w) is applied.
+
+  So setting AtmOptics%Include_Scattering = .FALSE. in the AOD module is exactly
+  what Get_Aerosol_Opt later sees as AerosolScatter%Include_Scattering. The
+  module doesn't declare a separate "AerosolScatter" variable, so AtmOptics is
+  the name there to set.
+
+  About AtmScatter: CRTM_AtmScatter_type in
+  AtmScatter/CRTM_AtmScatter_Define.f90 is an older structure. The current
+  forward, TL, AD, K and AOD code doesn't use it. It's only referenced by legacy
+  or auxiliary code (UWisc SOI, ODCAPS, the statistics tools, and the AtmOptics
+  test programs). The AtmScatter/ directory name is left over from that design,
+  but the aerosol routines in it now work on CRTM_AtmOptics_type.
+
+✻ Brewed for 13s · done 6:07 PM
+
+❯ ok, implement AAOD flag in the four functions CRTM_AOD, CRTM_AOD_TL,          
+  CRTM_AOD_AD, CRTM_AOD_K                                                       
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● I'll apply the edits: adding the argument and its declaration, updating
+  Compute_AAOD, and setting Include_Scattering on each pair right after the
+  stream setup, along with updated doc comments.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Every pattern matched the expected number of times. I'll check the TL part of
+  the diff, then build:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Alignment fix for the K line, then the build. CMake regenerates first because
+  test/CMakeLists.txt was restored.
+  Ran 1 shell command (ctrl+o to expand)
+
+● The CMake regeneration plus build ran past the 10-minute limit and is
+  continuing in the background. I'll wait for it to finish.
+
+● The build is still running in the background. When it finishes, I'll check
+  that the test objects that call CRTM_AOD were really recompiled, then run the
+  CRTM tests. The existing AOD regression tests will confirm that behavior
+  without the flag is unchanged.
+
+✻ Brewed for 10m 48s · done 6:21 PM
+
+● Background command "Regenerate CMake and build CRTM with the AAOD flag"
+completed (exit code 0)
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  2 skills available
+
+● The build succeeded, but 7 test objects are older than the new
+  crtm_aod_module.mod. I'll check whether any of them call the AOD functions,
+  which would reproduce the earlier stale-object crash:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Those 7 leftover files are just remnants from earlier AAOD tests that got
+  removed when the code was restored—they're no longer build targets, so they
+  don't matter since every live test object is freshly compiled. Running the
+  full CRTM suite now.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I've added the AAOD flag to all four functions in CRTM_AOD_Module.f90:
+  CRTM_AOD, CRTM_AOD_TL, CRTM_AOD_AD and CRTM_AOD_K. CRTM builds cleanly, and
+  the full CRTM test suite passes (196 of 196). Nothing has actually run with
+  AAOD=.TRUE. yet, so the AAOD path itself is untested.
+
+  What changed (only this one file):
+  - Argument: each function takes an optional LOGICAL, INTENT(IN) :: AAOD after
+    Options. A local Compute_AAOD defaults to .FALSE. and takes the flag's value
+    when you pass it.
+  - Where scattering is switched off: in each function, right after
+    CRTM_AtmOptics_Create and the stream setup, Include_Scattering is set to
+    .NOT. Compute_AAOD. It's set on both structures of each pair:
+    - forward: AtmOptics;
+    - TL: AtmOptics and AtmOptics_TL;
+    - AD: AtmOptics and AtmOptics_AD;
+    - K: AtmOptics and AtmOptics_K.
+
+    It has to come after Create, because Create can reset the flag to its
+    default.
+  - Result: with AAOD=.TRUE., the unchanged CRTM_AerosolScatter.f90 code uses
+    ke*(1-w) in place of ke, so Layer_Optical_Depth holds AAOD (and its TL, AD
+    or K counterparts) in the arrays that normally hold AOD.
+  - Docs: the header comments now describe the AAOD argument and show it in each
+    calling sequence.
+
+  Tests: the existing AOD forward and K-matrix regression tests pass for all 6
+  sensors. That shows behavior without the flag is unchanged, since existing
+  callers don't pass it. There are no AAOD tests in the tree at the moment.
+
+  Build note: CMake regenerated because test/CMakeLists.txt changed. Every test
+  object that calls CRTM_AOD was recompiled, so the earlier crash from stale
+  objects doesn't recur. The only objects left older than the new module are 7
+  orphans from my earlier, now-removed AAOD tests, plus their executables in
+  bin/. They aren't part of the build, and you can delete them.
+
+  Do you want tests next? For example, forward AAOD checked against Σ(1-w)·ke·ρ,
+  TL checked against finite differences, the dot-product test for AD, and K
+  checked against TL, all with AAOD=.TRUE. and GOCART-GEOS5.
+
+✻ Crunched for 1m 54s · done 6:24 PM
+
+❯ check AAOD sigma(1-w) x ke x rho, TL against finite differences , dot product 
+  for AD and K againsts TL with AAOD=.TRUE.                                     
+
+● I'll write the checks as one standalone program in the scratchpad and run it
+  against the rebuilt libcrtm.so, without touching the repository. First I'll
+  confirm the ChannelInfo field names needed to call the aerosol routine
+  directly for the reference calculation:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Next I'll write the check program. It runs four checks, all through the public
+  CRTM_AOD* calls with AAOD=.TRUE., on a profile containing one aerosol of each
+  of the 19 GOCART-GEOS5 types:
+
+  Made 1 scratchpad edit +319 (ctrl+o to expand)
+
+● Compiling against the rebuilt library, then running it for the 6 AOD test
+  sensors plus modis_aqua (visible channels):
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● I found that BRC.kb.v2.nc isn't readable by this build, so I'll switch to
+  AerosolCoeff.GOCART-GEOS5.nc4 like the AOD regression tests do. I'll also fix
+  setup error handling so STOP statements exit with a nonzero status instead of
+  masking failures.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Three of four checks pass across all sensors, but the forward check shows
+  small discrepancies for cris399_npp and cris-fsr_n21, likely from w clipping
+  in the LUT interpolation not being applied consistently. I'll now identify the
+  specific channel and aerosol type causing it.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The TL, AD and K checks pass for all 7 sensors. The forward check fails for
+  the two CrIS sensors: the implementation is doing what it should, but it
+  exposes a small existing quirk in the table interpolation.
+
+  Results (19 GOCART-GEOS5 types, 5 layers, AAOD=.TRUE.)
+
+  Check: 1. Forward AAOD = Σ(1-w)·ke·ρ (tol 1e-12)
+  modis_aqua: 0
+  abi_g18: 0
+  v.abi_g18: 0
+  v.abi_gr: 0
+  airs_aqua: 0
+  cris399_npp: 3.2e-7 FAIL
+  cris-fsr_n21: 1.9e-6 FAIL
+  ────────────────────────────────────────
+  Check: 2. TL vs central FD (tol 1e-5)
+  modis_aqua: 3.3e-7
+  abi_g18: 3.1e-7
+  v.abi_g18: 2.5e-6
+  v.abi_gr: 2.5e-6
+  airs_aqua: 3.3e-7
+  cris399_npp: 3.3e-7
+  cris-fsr_n21: 3.3e-7
+  ────────────────────────────────────────
+  Check: 3. AD dot product (tol 1e-12)
+  modis_aqua: 3e-16
+  abi_g18: 0
+  v.abi_g18: 6e-15
+  v.abi_gr: 1e-14
+  airs_aqua: 4e-16
+  cris399_npp: 4e-15
+  cris-fsr_n21: 1e-15
+  ────────────────────────────────────────
+  Check: 4. K vs TL, every element (tol 1e-12)
+  modis_aqua: 8e-18
+  abi_g18: 5e-18
+  v.abi_g18: 6e-18
+  v.abi_gr: 2e-18
+  airs_aqua: 1e-17
+  cris399_npp: 1e-17
+  cris-fsr_n21: 1e-17
+
+  How each check works
+  - Forward: the reference AAOD comes from a separate call to
+    CRTM_Compute_AerosolScatter with scattering on, using its extinction ke and
+    w, so it doesn't rely on the ke*(1-w) branch. That call's optical depth
+    equals CRTM_AOD without the flag, which confirms the channel mapping is
+    right.
+  - TL: the finite-difference error falls 100× for each 10× smaller step (3.3e-5
+    → 3.3e-7 → 3.3e-9), which is the expected behaviour of a correct TL.
+  - K: covers every Jacobian element: 5 layers × (19 concentrations + RH), in
+    every channel.
+
+  Why the forward check fails for CrIS
+
+  The difference comes from organic carbon (type 11) in a few CrIS channels near
+  1210 cm⁻¹ (8.3 µm): 5 values for cris399_npp and 25 for cris-fsr_n21. At
+  those wavenumbers the table interpolation gives a slightly negative single
+  scattering albedo, w between −1.5e-5 and −8e-5.
+  - The reference (scattering on) clips w to 0, giving ke·1.
+  - The AAOD path computes ke*(1-w) in Get_Aerosol_Opt before w is clipped,
+    giving ke·(1+8e-5).
+
+  So those values are high by at most about 8e-5 of that aerosol's contribution.
+  This is the negative-w case I flagged as unlikely in the feasibility review.
+  It happens at a few thermal-IR channels, not at the visible wavelengths
+  typically used for AOD. The TL, AD and K are consistent with each other there
+  too; the small linearization difference is well under the finite-difference
+  tolerance.
+
+  Options
+  1. Accept it: the effect is under 1e-4 relative and limited to a few 8 µm
+     channels. The forward check would then use a tolerance of about 1e-4, or
+     skip w < 0 cases.
+  2. Fix it at the source: clip w to [0,1] before ke = ke*(1-w) in the forward
+     code (Get_Aerosol_Opt), with matching TL and AD changes. This touches
+     CRTM_AerosolScatter.f90 and would slightly change existing results from any
+     scattering-off calculation.
+
+  Both programs (check_aaod.f90 and diag.f90) are in my scratchpad; I haven't
+  changed the repository. Which option do you want, and should I add the checks
+  to CRTM's ctest?
+
+✻ Worked for 4m 26s · done 6:31 PM
+
+❯ 1                                                                             
+
+● I'll loosen only the forward AAOD-vs-reference tolerance to 1e-4, leaving the
+  other checks' tolerances as they are, and rerun.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● I've accepted the small negative-w effect as you chose: the forward check now
+  allows a relative difference of up to 1e-4. With that, all four checks pass
+  for all 7 sensors.
+
+  ┌───────────────────────────┬────────────────┬───────┬───────────┬───────┐
+  │          Sensor           │  Forward vs    │ TL vs │  AD dot   │ K vs  │
+  │                           │  Σ(1-w)·ke·ρ   │   FD  │  product  │  TL   │
+  ├───────────────────────────┼────────────────┼───────┼───────────┼───────┤
+  │ modis_aqua, abi_g18,      │                │       │           │       │
+  │ v.abi_g18, v.abi_gr,      │ 0              │ pass  │ pass      │ pass  │
+  │ airs_aqua                 │                │       │           │       │
+  ├───────────────────────────┼────────────────┼───────┼───────────┼───────┤
+  │ cris399_npp               │ 3.2e-7         │ pass  │ pass      │ pass  │
+  ├───────────────────────────┼────────────────┼───────┼───────────┼───────┤
+  │ cris-fsr_n21              │ 1.9e-6         │ pass  │ pass      │ pass  │
+  └───────────────────────────┴────────────────┴───────┴───────────┴───────┘
+
+  - Forward tolerance: only the AAOD-vs-reference comparison and the AAOD ≤ AOD
+    check use the 1e-4 tolerance. The other forward check still uses 1e-12: the
+    scattering-on reference matching CRTM_AOD without the flag.
+  - What's different in the CrIS sensors: their remaining difference is entirely
+    from organic carbon near 1210 cm⁻¹, where the table gives w ≈ −8e-5. The
+    other five sensors match exactly.
+  - Where the check programs live: check_aaod.f90 (and the diag.f90 diagnostic)
+    are still only in my scratchpad, not in the repository. You run the check
+    from build/jedi-bundle/crtm/test with a sensor name as its argument.
+
+  The only repository change is the AAOD flag in CRTM_AOD_Module.f90. Should I
+  add check_aaod to CRTM's ctest, for example as a regression test run over the
+  AOD sensor list?
+
+✻ Sautéed for 1m 53s · done 6:35 PM
+
+❯ /crtm_aaod_create_tests                                                       
+  ⎿  1 skill available
+
+● I'll check what's in the restored test tree before writing anything:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The test tree is clean except for leftover test_AAOD_*.Atmosphere.bin files
+  from a prior attempt with a different RH profile, so I'll move those aside
+  before proceeding. Next I'll build the AAOD regression tests by mirroring the
+  AOD tests (calling CRTM_AOD/CRTM_AOD_K with AAOD=.TRUE.), alongside the three
+  already-verified AAOD unit tests.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● Confirmed both regression mains only differ from their AOD versions as
+  intended. Now moving on to the three unit tests, each self-contained like the
+  existing ones and using modis_aqua with the binary GOCART-GEOS5 table.
+
+● Write(mains/unit/Unit_Test/test_AerosolScatter_AAOD_TL.f90)  ⎿  Wrote 219 lines to
+     mains/unit/Unit_Test/test_AerosolScatter_AAOD_TL.f90
+       1 !
+       2 ! test_AerosolScatter_AAOD_TL
+       4 ! Unit test for the absorption aerosol optical depth (AAOD) comp
+         uted by
+       5 ! CRTM_AOD and CRTM_AOD_TL with AAOD = .TRUE. (GOCART-GEOS5 tabl
+       6 ! The profile contains one aerosol of every type in the table.
+       7 !
+       8 ! Verifies that
+         nction
+      10 !     coefficient ke and single scatter albedo w are taken from
+     … +257 lines (ctrl+o to expand)
+
+● Write(mains/unit/Unit_Test/test_AerosolScatter_AAOD_AD.f90)
+  ⎿  Wrote 130 lines to
+     mains/unit/Unit_Test/test_AerosolScatter_AAOD_AD.f90
+       1 !
+       2 ! test_AerosolScatter_AAOD_AD
+       4 ! Unit test for the absorption aerosol optical depth (AAOD) adjo
+         int
+       5 ! computed by CRTM_AOD_AD with AAOD = .TRUE. (GOCART-GEOS5 table
+       6 ! The profile contains one aerosol of every type in the table.
+       7 !
+       8 ! Verifies adjoint consistency with the tangent linear model,
+      10 ! for a perturbation dx of the aerosol concentration and relativ
+         e humidity.
+     … +138 lines (ctrl+o to expand)
+
+● Write(mains/unit/Unit_Test/test_AerosolScatter_AAOD_K.f90)
+  ⎿  Wrote 134 lines to mains/unit/Unit_Test/test_AerosolScatter_AAOD_K.f90
+       1 !
+       3 !
+       4 ! Unit test for the absorption aerosol optical depth (AAOD) Jaco
+       5 ! computed by CRTM_AOD_K with AAOD = .TRUE. (GOCART-GEOS5 table)
+         .
+       7 !
+       8 ! The K-matrix input is the column AAOD, RTSolution_K%Layer_Opti
+       9 ! so Atm_K holds d(column AAOD)/dx for every channel. Every conc
+         entration
+         column
+     … +139 lines (ctrl+o to expand)
+
+● Next the CMake edits: the three unit tests after the AerosolScatter_K block,
+  AAOD_Sensor_Ids, and AAOD in common_tests.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I'll move the stale Sep 25 K-matrix AAOD references into a folder (not delete
+  them) so the new K test can regenerate its own, then reconfigure CMake and
+  kick off the build in the background since it took over 10 minutes last time.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The CMake regeneration and build are running in the background. When they
+  finish, I'll run the AAOD tests and then the full CRTM suite.
+
+✻ Baked for 2m 38s · done 6:42 PM
+
+● Background command "Regenerate CMake and build CRTM with new AAOD tests"
+completed (exit code 0)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● All 15 AAOD tests pass, though the forward and K-matrix regression tests only
+  generated reference files on this run. I'll rerun them to verify they match
+  those saved references and check the unit test results.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The unit tests pass as expected. But the regression reruns didn't print the
+  expected "results are the same" line, so I'll check what they actually output:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+● The comparison does run: the forward log ends with "RTSolution results are the
+  same!". My earlier grep missed it because the test prints about 700,000
+  lines. Checking the K-matrix test the same way:
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  1 skill available
+
+● Both regression tests match their saved references. I'll now cross-check the
+  new forward AAOD output against the independently computed references left
+  from the Sep 25 attempt.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● The new forward AAOD matches the earlier, independently written implementation
+  to machine precision (about 3e-16) for all 6 sensors. Last step, the full
+  CRTM suite:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I added the AAOD tests you asked for, and they all pass: 15 new AAOD tests,
+  and all 211 tests in the full CRTM ctest run. The forward and K-matrix
+  regression tests created their reference files on the first run and matched
+  them on a second run.
+
+  test/CMakeLists.txt
+  - test_Unit_AerosolScatter_AAOD_TL, _AD and _K, placed right after the three
+    AOD unit tests.
+  - AAOD_Sensor_Ids with the 6 sensors you listed.
+  - AAOD added to common_tests after AOD. This creates
+    test_forward_AAOD_<sensor> and test_k_matrix_AAOD_<sensor> for all 6
+    sensors.
+
+  New test programs
+
+  ┌────────────────────────┬─────────────────────────────┬─────────────────┐
+  │          Test          │       What it checks        │     Result      │
+  ├────────────────────────┼─────────────────────────────┼─────────────────┤
+  │ Unit AAOD_TL           │ Forward AAOD equals         │ Forward         │
+  │ (modis_aqua, 19 GOCART │ Σ(1-w)·ke·ρ; TL matches     │ difference 0;   │
+  │  types)                │ finite differences for      │ TL error ≤      │
+  │                        │ concentration, RH and both  │ 3.3e-7          │
+  ├────────────────────────┼─────────────────────────────┼─────────────────┤
+  │ Unit AAOD_AD           │ Dot-product test comparing  │ 2.8e-16         │
+  │                        │ the TL with the adjoint     │                 │
+  ├────────────────────────┼─────────────────────────────┼─────────────────┤
+  │                        │ Every column-AAOD Jacobian  │ max|K−TL| =     │
+  │ Unit AAOD_K            │ (5 layers × (19             │ 9e-15 on values │
+  │                        │ concentrations + RH))       │  up to about    │
+  │                        │ matches the TL              │ 1e3             │
+  ├────────────────────────┼─────────────────────────────┼─────────────────┤
+  │                        │ Same as the AOD forward     │                 │
+  │ forward/test_AAOD × 6  │ test but with AAOD=.TRUE.,  │ Pass            │
+  │ sensors                │ plus a check that 0 ≤ AAOD  │                 │
+  │                        │ ≤ AOD                       │                 │
+  ├────────────────────────┼─────────────────────────────┼─────────────────┤
+  │ k_matrix/test_AAOD × 6 │ Same as the AOD K-matrix    │ Pass            │
+  │  sensors               │ test but with AAOD=.TRUE.   │                 │
+  └────────────────────────┴─────────────────────────────┴─────────────────┘
+
+  The two regression mains are copies of the AOD ones. The forward one adds the
+  AAOD=.TRUE. call and the [0, AOD] check, with a 1e-4 tolerance on the upper
+  bound because of the slightly negative w issue. The K-matrix one only adds
+  AAOD=.TRUE. to the CRTM_AOD_K call. Each directory also has a copy of
+  Load_Atm_Data.inc.
+
+  Independent cross-check: the new forward AAOD matches the layer AAOD saved by
+  your Sep 25 implementation to about 3e-16 for all 6 sensors. That
+  implementation computed (1-w)·ke with scattering on, a completely different
+  route, on the same profile.
+
+  Housekeeping in the build directory
+  - Moved old K-matrix references: I moved the Sep 25 files
+    test_AAOD_*.Atmosphere.bin to results/k_matrix/old_AAOD_refs_2026-09-25/.
+    They used a different RH profile and would have made the new K test fail, so
+    its references were regenerated.
+  - Stale leftovers: the old executables test_adjoint_test_AAOD,
+    test_tangent_linear_test_AAOD and Unit_AerosolScatter_AAOD are still in
+    bin/. They aren't build targets any more, and you can delete them.
+
+✻ Cogitated for 3m 7s · done 6:47 PM
+
+※ recap: We're adding absorption AOD (AAOD) to CRTM with an `AAOD=.TRUE.` flag on the four `CRTM_AOD` functions; the new AAOD unit and regression tests all pass, as does the full 211-test suite. Next is reviewing the changes and committing them.
+
+❯ in every modified file add in comments date of modification and my name       
+  "Mariusz Pagowski" in CREATION HISTORY modified by and email                  
+  mariusz.pagowski@colorado.edu                                                 
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● I'll add your details to the two modified files and to the five new test
+  programs:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+● Your name, email and the date (2026/9/26) are now in all seven files I changed
+  or created:
+
+  - src/AtmScatter/CRTM_AOD_Module.f90: added a "Modified by" entry after
+    Yingtao Ma's in the existing CREATION HISTORY. It gives your name, date and
+    email, plus a one-line description of the AAOD argument.
+  - test/CMakeLists.txt: it has no CREATION HISTORY section, so I added #
+    comment lines with your name, date and email above the AAOD_Sensor_Ids list,
+    above the three AAOD unit tests, and next to AAOD in common_tests.
+  - forward/test_AAOD/test_AAOD.f90 and k_matrix/test_AAOD/test_AAOD.f90: new
+    CREATION HISTORY with "Modified by … Adapted from test_AOD", since both are
+    copies of the AOD tests.
+  - test_AerosolScatter_AAOD_TL.f90, _AD.f90 and _K.f90: new CREATION HISTORY. I
+    used "Written by:" rather than "Modified by" because these are new files,
+    not modified ones. Tell me if you'd rather have "Modified by" there too.
+
+  The two Load_Atm_Data.inc files in the test_AAOD directories are unchanged
+  copies of the AOD ones, so I left them alone.
+
+  These are comment-only changes, so I didn't rebuild or rerun the tests. The
+  comment inside the common_tests list is valid CMake, and the next make will
+  reconfigure because CMakeLists.txt changed.
+
+✻ Cogitated for 35s · done 6:56 PM
+
+❯ you can remove this comment from test/CmakeLists.txt                          
+
+● Update(CMakeLists.txt)
+  ⎿  Removed 1 line
+      253  list (APPEND common_tests
+      254       Simple
+      255       AOD
+      256 -     # AAOD added by Mariusz Pagowski, 2026/9/26, mariusz.pago
+          -wski@colorado.edu                                             
+      256       AAOD
+      257       Zeeman
+      258       ChannelSubset
+
+● I removed the comment inside the common_tests list, so that list now just
+  reads AOD then AAOD.
+
+  Two similar comments are still in test/CMakeLists.txt: one above the
+  AAOD_Sensor_Ids list and one above the three AAOD unit tests. Do you want
+  those removed too?
+
+✻ Crunched for 5s · done 6:58 PM
+
+❯ yes, remove all from CMakeLists.txt                                           
+
+  Ran 2 shell commands (ctrl+o to expand)
+● I removed all of the comments I added to test/CMakeLists.txt; none are left.
+  The only additions in that file now are the actual test setup: the
+  AAOD_Sensor_Ids list, AAOD in common_tests, and the three AAOD unit tests.
+  Your name and email are still in the headers of the Fortran files.
+
+✻ Brewed for 9s · done 6:59 PM
+
+❯ good                                                                          
+
+  Wrote 1 memory (ctrl+o to expand)
+  ⎿  Remembered where the user wants modification attribution (name, date, emai…
+
+● Thanks. I've saved a note for future sessions: put your attribution in the
+  Fortran CREATION HISTORY blocks, never in CMakeLists.txt.
+
+  Where things stand:
+  - Code change: the only source change is the optional AAOD flag in the four
+    functions in CRTM_AOD_Module.f90.
+  - Tests: the 15 AAOD tests (3 unit tests, plus forward and K-matrix regression
+    tests for 6 sensors) and the rest of the CRTM suite passed on the last run.
+    That was before the comment-only edits, which don't need a rerun.
+  - Git: nothing is committed. The changes are on branch feature/aaod_mzp
+    whenever you want to commit them.
+
+✻ Churned for 11s · done 6:59 PM
+
+● Unknown command: /exportt. Did you mean /export?

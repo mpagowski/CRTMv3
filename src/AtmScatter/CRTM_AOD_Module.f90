@@ -11,6 +11,11 @@
 !       Modified by     Yingtao Ma, 2020/6/11
 !                       yingtao.ma@noaa.gov
 !                       Implemented CMAQ aerosol
+!       Modified by     Mariusz Pagowski, 2026/9/26
+!                       mariusz.pagowski@colorado.edu
+!                       Added optional AAOD argument to CRTM_AOD, CRTM_AOD_TL,
+!                       CRTM_AOD_AD and CRTM_AOD_K to compute the absorption
+!                       aerosol optical depth (AAOD)
 
 MODULE CRTM_AOD_Module
 
@@ -88,7 +93,8 @@ CONTAINS
 !       Error_Status = CRTM_AOD( Atmosphere       , &
 !                                ChannelInfo      , &
 !                                RTSolution       , &
-!                                Options = Options  )
+!                                Options = Options, &
+!                                AAOD    = AAOD     )
 !
 ! INPUTS:
 !       Atmosphere:     Structure containing the Atmosphere data.
@@ -121,6 +127,18 @@ CONTAINS
 !                       DIMENSION:  Same as input Atmosphere structure
 !                       ATTRIBUTES: INTENT(IN), OPTIONAL
 !
+!       AAOD:           Set to .TRUE. to compute the aerosol absorption optical
+!                       depth (AAOD) instead of the AOD. The AAOD is returned
+!                       in the same Layer_Optical_Depth components that
+!                       otherwise hold the AOD. Aerosol scattering is switched
+!                       off, so the aerosol extinction coefficient is replaced
+!                       by the absorption coefficient, ke*(1-w).
+!                       If not specified, or .FALSE., the AOD is computed.
+!                       UNITS:      N/A
+!                       TYPE:       LOGICAL
+!                       DIMENSION:  Scalar
+!                       ATTRIBUTES: INTENT(IN), OPTIONAL
+!
 ! FUNCTION RESULT:
 !       Error_Status:   The return value is an integer defining the error status.
 !                       The error codes are defined in the Message_Handler module.
@@ -142,13 +160,15 @@ CONTAINS
     Atmosphere , &  ! Input, M
     ChannelInfo, &  ! Input, M
     RTSolution , &  ! Output, L x M
-    Options    ) &  ! Optional input, M
+    Options    , &  ! Optional input, M
+    AAOD       ) &  ! Optional input
   RESULT( Error_Status )
     ! Arguments
     TYPE(CRTM_Atmosphere_type),        INTENT(IN)     :: Atmosphere(:)     ! M
     TYPE(CRTM_ChannelInfo_type),       INTENT(IN)     :: ChannelInfo(:)    ! n_Sensors
     TYPE(CRTM_RTSolution_type),        INTENT(IN OUT) :: RTSolution(:,:)   ! L x M
     TYPE(CRTM_Options_type), OPTIONAL, INTENT(IN)     :: Options(:)        ! M
+    LOGICAL,                 OPTIONAL, INTENT(IN)     :: AAOD
     ! Function result
     INTEGER :: Error_Status
     ! Local parameters
@@ -157,6 +177,7 @@ CONTAINS
     CHARACTER(ML) :: Message
     LOGICAL :: Options_Present
     LOGICAL :: Check_Input
+    LOGICAL :: Compute_AAOD
     INTEGER :: n, n_Sensors,  SensorIndex
     INTEGER :: l, n_Channels, ChannelIndex
     INTEGER :: m, n_Profiles
@@ -170,6 +191,11 @@ CONTAINS
     ! SET UP
     ! ------
     Error_Status = SUCCESS
+
+
+    ! Compute absorption AOD (AAOD) instead of AOD if requested
+    Compute_AAOD = .FALSE.
+    IF ( PRESENT(AAOD) ) Compute_AAOD = AAOD
 
 
     ! If no sensors or channels, simply return
@@ -278,6 +304,10 @@ CONTAINS
       END IF
       ! ...Set default number of streams
       AtmOptics%n_Legendre_Terms = 4
+      ! ...AAOD: without scattering the aerosol extinction coefficient
+      !    is replaced by the absorption coefficient, ke*(1-w), in
+      !    CRTM_Compute_AerosolScatter, so the optical depth is the AAOD
+      AtmOptics%Include_Scattering = .NOT. Compute_AAOD
 
 
       ! Allocate the aerosol scattering internal variable if necessary
@@ -376,7 +406,8 @@ CONTAINS
 !                                   ChannelInfo      , &
 !                                   RTSolution       , &
 !                                   RTSolution_TL    , &
-!                                   Options = Options  )
+!                                   Options = Options, &
+!                                   AAOD    = AAOD     )
 !
 ! INPUTS:
 !       Atmosphere:     Structure containing the Atmosphere data.
@@ -422,6 +453,18 @@ CONTAINS
 !                       DIMENSION:  Same as input Atmosphere structure
 !                       ATTRIBUTES: INTENT(IN), OPTIONAL
 !
+!       AAOD:           Set to .TRUE. to compute the aerosol absorption optical
+!                       depth (AAOD) instead of the AOD. The AAOD is returned
+!                       in the same Layer_Optical_Depth components that
+!                       otherwise hold the AOD. Aerosol scattering is switched
+!                       off, so the aerosol extinction coefficient is replaced
+!                       by the absorption coefficient, ke*(1-w).
+!                       If not specified, or .FALSE., the AOD is computed.
+!                       UNITS:      N/A
+!                       TYPE:       LOGICAL
+!                       DIMENSION:  Scalar
+!                       ATTRIBUTES: INTENT(IN), OPTIONAL
+!
 ! FUNCTION RESULT:
 !       Error_Status:   The return value is an integer defining the error status.
 !                       The error codes are defined in the Message_Handler module.
@@ -445,7 +488,8 @@ CONTAINS
     ChannelInfo  , &  ! Input, M
     RTSolution   , &  ! Output, L x M
     RTSolution_TL, &  ! Output, L x M
-    Options      ) &  ! Optional FWD input, M
+    Options      , &  ! Optional FWD input, M
+    AAOD         ) &  ! Optional input
   RESULT( Error_Status )
     ! Arguments
     TYPE(CRTM_Atmosphere_type),        INTENT(IN)     :: Atmosphere(:)      ! M
@@ -454,6 +498,7 @@ CONTAINS
     TYPE(CRTM_RTSolution_type),        INTENT(IN OUT) :: RTSolution(:,:)    ! L x M
     TYPE(CRTM_RTSolution_type),        INTENT(IN OUT) :: RTSolution_TL(:,:) ! L x M
     TYPE(CRTM_Options_type), OPTIONAL, INTENT(IN)     :: Options(:)         ! M
+    LOGICAL,                 OPTIONAL, INTENT(IN)     :: AAOD
     ! Function result
     INTEGER :: Error_Status
     ! Local parameters
@@ -462,6 +507,7 @@ CONTAINS
     CHARACTER(ML) :: Message
     LOGICAL :: Options_Present
     LOGICAL :: Check_Input
+    LOGICAL :: Compute_AAOD
     INTEGER :: Status_FWD, Status_TL
     INTEGER :: n, n_Sensors,  SensorIndex
     INTEGER :: l, n_Channels, ChannelIndex
@@ -476,6 +522,11 @@ CONTAINS
     ! SET UP
     ! ------
     Error_Status = SUCCESS
+
+
+    ! Compute absorption AOD (AAOD) instead of AOD if requested
+    Compute_AAOD = .FALSE.
+    IF ( PRESENT(AAOD) ) Compute_AAOD = AAOD
 
 
     ! If no sensors or channels, simply return
@@ -592,6 +643,11 @@ CONTAINS
       ! ...Set default number of streams
       AtmOptics%n_Legendre_Terms    = 4
       AtmOptics_TL%n_Legendre_Terms = AtmOptics%n_Legendre_Terms
+      ! ...AAOD: without scattering the aerosol extinction coefficient
+      !    is replaced by the absorption coefficient, ke*(1-w), in
+      !    CRTM_Compute_AerosolScatter, so the optical depth is the AAOD
+      AtmOptics%Include_Scattering    = .NOT. Compute_AAOD
+      AtmOptics_TL%Include_Scattering = .NOT. Compute_AAOD
 
 
       ! Allocate the aerosol scattering internal variable if necessary
@@ -707,7 +763,8 @@ CONTAINS
 !                                   ChannelInfo      , &
 !                                   RTSolution       , &
 !                                   Atmosphere_AD    , &
-!                                   Options = Options  )
+!                                   Options = Options, &
+!                                   AAOD    = AAOD     )
 !
 ! INPUTS:
 !       Atmosphere:     Structure containing the Atmosphere data.
@@ -759,6 +816,18 @@ CONTAINS
 !                       DIMENSION:  Same as input Atmosphere structure
 !                       ATTRIBUTES: INTENT(IN), OPTIONAL
 !
+!       AAOD:           Set to .TRUE. to compute the aerosol absorption optical
+!                       depth (AAOD) instead of the AOD. The AAOD is returned
+!                       in the same Layer_Optical_Depth components that
+!                       otherwise hold the AOD. Aerosol scattering is switched
+!                       off, so the aerosol extinction coefficient is replaced
+!                       by the absorption coefficient, ke*(1-w).
+!                       If not specified, or .FALSE., the AOD is computed.
+!                       UNITS:      N/A
+!                       TYPE:       LOGICAL
+!                       DIMENSION:  Scalar
+!                       ATTRIBUTES: INTENT(IN), OPTIONAL
+!
 ! FUNCTION RESULT:
 !       Error_Status:   The return value is an integer defining the error status.
 !                       The error codes are defined in the Message_Handler module.
@@ -782,7 +851,8 @@ CONTAINS
     ChannelInfo  , &  ! Input, M
     RTSolution   , &  ! Output, L x M
     Atmosphere_AD, &  ! Output, L x M
-    Options      ) &  ! Optional input, M
+    Options      , &  ! Optional input, M
+    AAOD         ) &  ! Optional input
   RESULT( Error_Status )
     ! Arguments
     TYPE(CRTM_Atmosphere_type),        INTENT(IN)     :: Atmosphere(:)      ! M
@@ -791,6 +861,7 @@ CONTAINS
     TYPE(CRTM_RTSolution_type),        INTENT(IN OUT) :: RTSolution(:,:)    ! L x M
     TYPE(CRTM_Atmosphere_type),        INTENT(IN OUT) :: Atmosphere_AD(:)   ! M
     TYPE(CRTM_Options_type), OPTIONAL, INTENT(IN)     :: Options(:)         ! M
+    LOGICAL,                 OPTIONAL, INTENT(IN)     :: AAOD
     ! Function result
     INTEGER :: Error_Status
     ! Local parameters
@@ -799,6 +870,7 @@ CONTAINS
     CHARACTER(ML) :: Message
     LOGICAL :: Options_Present
     LOGICAL :: Check_Input
+    LOGICAL :: Compute_AAOD
     INTEGER :: Status_FWD, Status_AD
     INTEGER :: n, n_Sensors,  SensorIndex
     INTEGER :: l, n_Channels, ChannelIndex
@@ -814,6 +886,11 @@ CONTAINS
     ! SET UP
     ! ------
     Error_Status = SUCCESS
+
+
+    ! Compute absorption AOD (AAOD) instead of AOD if requested
+    Compute_AAOD = .FALSE.
+    IF ( PRESENT(AAOD) ) Compute_AAOD = AAOD
 
 
     ! If no sensors or channels, simply return
@@ -930,6 +1007,11 @@ CONTAINS
       ! ...Set default number of streams
       AtmOptics%n_Legendre_Terms    = 4
       AtmOptics_AD%n_Legendre_Terms = AtmOptics%n_Legendre_Terms
+      ! ...AAOD: without scattering the aerosol extinction coefficient
+      !    is replaced by the absorption coefficient, ke*(1-w), in
+      !    CRTM_Compute_AerosolScatter, so the optical depth is the AAOD
+      AtmOptics%Include_Scattering    = .NOT. Compute_AAOD
+      AtmOptics_AD%Include_Scattering = .NOT. Compute_AAOD
 
 
       ! Allocate the aerosol scattering internal variable if necessary
@@ -1053,7 +1135,8 @@ CONTAINS
 !                                  ChannelInfo       , &
 !                                  RTSolution        , &
 !                                  Atmosphere_K      , &
-!                                  Opttions = Options  )
+!                                  Opttions = Options, &
+!                                  AAOD    = AAOD     )
 !
 ! INPUTS:
 !       Atmosphere:     Structure containing the Atmosphere data.
@@ -1106,6 +1189,18 @@ CONTAINS
 !                       DIMENSION:  Same as input Atmosphere structure
 !                       ATTRIBUTES: INTENT(IN), OPTIONAL
 !
+!       AAOD:           Set to .TRUE. to compute the aerosol absorption optical
+!                       depth (AAOD) instead of the AOD. The AAOD is returned
+!                       in the same Layer_Optical_Depth components that
+!                       otherwise hold the AOD. Aerosol scattering is switched
+!                       off, so the aerosol extinction coefficient is replaced
+!                       by the absorption coefficient, ke*(1-w).
+!                       If not specified, or .FALSE., the AOD is computed.
+!                       UNITS:      N/A
+!                       TYPE:       LOGICAL
+!                       DIMENSION:  Scalar
+!                       ATTRIBUTES: INTENT(IN), OPTIONAL
+!
 ! FUNCTION RESULT:
 !       Error_Status:   The return value is an integer defining the error status.
 !                       The error codes are defined in the Message_Handler module.
@@ -1129,7 +1224,8 @@ CONTAINS
     ChannelInfo , &  ! Input, M
     RTSolution  , &  ! Output, L x M
     Atmosphere_K, &  ! Output, L x M
-    Options     ) &  ! Optional input, M
+    Options     , &  ! Optional input, M
+    AAOD        ) &  ! Optional input
   RESULT( Error_Status )
     ! Arguments
     TYPE(CRTM_Atmosphere_type),        INTENT(IN)     :: Atmosphere(:)      ! M
@@ -1138,6 +1234,7 @@ CONTAINS
     TYPE(CRTM_RTSolution_type),        INTENT(IN OUT) :: RTSolution(:,:)    ! L x M
     TYPE(CRTM_Atmosphere_type),        INTENT(IN OUT) :: Atmosphere_K(:,:)  ! L x M
     TYPE(CRTM_Options_type), OPTIONAL, INTENT(IN)     :: Options(:)         ! M
+    LOGICAL,                 OPTIONAL, INTENT(IN)     :: AAOD
     ! Function result
     INTEGER :: Error_Status
     ! Local parameters
@@ -1146,6 +1243,7 @@ CONTAINS
     CHARACTER(ML) :: Message
     LOGICAL :: Options_Present
     LOGICAL :: Check_Input
+    LOGICAL :: Compute_AAOD
     INTEGER :: Status_FWD, Status_K
     INTEGER :: n, n_Sensors,  SensorIndex
     INTEGER :: l, n_Channels, ChannelIndex
@@ -1161,6 +1259,11 @@ CONTAINS
     ! SET UP
     ! ------
     Error_Status = SUCCESS
+
+
+    ! Compute absorption AOD (AAOD) instead of AOD if requested
+    Compute_AAOD = .FALSE.
+    IF ( PRESENT(AAOD) ) Compute_AAOD = AAOD
 
 
     ! If no sensors or channels, simply return
@@ -1282,6 +1385,11 @@ CONTAINS
       ! ...Set default number of streams
       AtmOptics%n_Legendre_Terms    = 4
       AtmOptics_K%n_Legendre_Terms = AtmOptics%n_Legendre_Terms
+      ! ...AAOD: without scattering the aerosol extinction coefficient
+      !    is replaced by the absorption coefficient, ke*(1-w), in
+      !    CRTM_Compute_AerosolScatter, so the optical depth is the AAOD
+      AtmOptics%Include_Scattering    = .NOT. Compute_AAOD
+      AtmOptics_K%Include_Scattering  = .NOT. Compute_AAOD
 
 
       ! Allocate the aerosol scattering internal variable if necessary
