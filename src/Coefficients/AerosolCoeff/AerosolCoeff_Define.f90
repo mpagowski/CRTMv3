@@ -16,6 +16,9 @@
 !       Modified by     Cheng Dang, 30-Mar-2022
 !                       dangch@ucar.edu
 !                       Add dimension n_RH_Radii, update AEROSOLCOEFF_RELEASE
+!       Modified by     Mariusz Pagowski, 2026/10/22
+!                       mariusz.pagowski@colorado.edu
+!                       Add fmass1, fraction of mass < 1 um diameter, for fine-mode AOD
 
 MODULE AerosolCoeff_Define
 
@@ -83,6 +86,7 @@ MODULE AerosolCoeff_Define
   INTEGER, PARAMETER :: ML = 256
   ! Literals
   REAL(Double), PARAMETER :: ZERO = 0.0_Double
+  REAL(Double), PARAMETER :: ONE  = 1.0_Double
 
 
   ! ---------------------------------
@@ -123,6 +127,7 @@ MODULE AerosolCoeff_Define
     REAL(Double),  ALLOCATABLE :: w(:,:,:,:,:)           ! I1 x I4 x I2 x I2.1 x I3
     REAL(Double),  ALLOCATABLE :: g(:,:,:,:,:)           ! I1 x I4 x I2 x I2.1 x I3
     REAL(Double),  ALLOCATABLE :: pcoeff(:,:,:,:,:,:,:)  ! I1 x I4 x I2 x I2.1 x I3 x I5 x I6
+    REAL(Double),  ALLOCATABLE :: fmass1(:,:)            ! I4 x I3, fraction of mass < 1 um diameter
   END TYPE AerosolCoeff_type
   !:tdoc-:
 
@@ -363,6 +368,7 @@ CONTAINS
                                     n_Types           , &
                                     0:n_Legendre_Terms, &
                                     n_Phase_Elements    ), &
+               AerosolCoeff%fmass1( n_RH, n_Types ), &
                STAT = alloc_stat )
       IF ( alloc_stat /= 0 ) RETURN
 
@@ -393,6 +399,7 @@ CONTAINS
       AerosolCoeff%w          = ZERO
       AerosolCoeff%g          = ZERO
       AerosolCoeff%pcoeff     = ZERO
+      AerosolCoeff%fmass1     = ONE
 
 
       ! Set allocationindicator
@@ -467,6 +474,8 @@ CONTAINS
     WRITE(*,'(5(1x,es22.15,:))') AerosolCoeff%g
     WRITE(*,'(3x,"AerosolCoeff pcoeff    :")')
     WRITE(*,'(5(1x,es22.15,:))') AerosolCoeff%pcoeff
+    WRITE(*,'(3x,"AerosolCoeff fmass1    :")')
+    WRITE(*,'(5(1x,es22.15,:))') AerosolCoeff%fmass1
   END SUBROUTINE AerosolCoeff_Inspect
 
 
@@ -976,7 +985,8 @@ CONTAINS
          ALL(x%kb         .EqualTo. y%kb         ) .AND. &
          ALL(x%w          .EqualTo. y%w          ) .AND. &
          ALL(x%g          .EqualTo. y%g          ) .AND. &
-         ALL(x%pcoeff     .EqualTo. y%pcoeff     )       ) &
+         ALL(x%pcoeff     .EqualTo. y%pcoeff     ) .AND. &
+         ALL(x%fmass1     .EqualTo. y%fmass1     )       ) &
       is_equal = .TRUE.
 
   END FUNCTION AerosolCoeff_Equal

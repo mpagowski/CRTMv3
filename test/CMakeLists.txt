@@ -213,6 +213,24 @@ list( APPEND AAOD_Sensor_Ids
         airs_aqua
 )
 
+list( APPEND FineMode_AOD_Sensor_Ids
+        cris-fsr_n21
+        v.abi_g18
+        cris399_npp
+        v.abi_gr
+        abi_g18
+        airs_aqua
+)
+
+list( APPEND FineMode_AAOD_Sensor_Ids
+        cris-fsr_n21
+        v.abi_g18
+        cris399_npp
+        v.abi_gr
+        abi_g18
+        airs_aqua
+)
+
 # Create list of sensor ids for testing
 list( APPEND Zeeman_Sensor_Ids
       ssmis_f20
@@ -252,6 +270,8 @@ list (APPEND common_tests
      Simple
      AOD
      AAOD
+     FineMode_AOD
+     FineMode_AAOD
      Zeeman
      ChannelSubset
      ClearSky
@@ -343,6 +363,24 @@ target_link_libraries(Unit_AerosolScatter_AAOD_K PRIVATE crtm)
 add_test(NAME test_Unit_AerosolScatter_AAOD_K
          COMMAND $<TARGET_FILE:Unit_AerosolScatter_AAOD_K>)
 set_tests_properties(test_Unit_AerosolScatter_AAOD_K PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=$ENV{OMP_NUM_THREADS}")
+
+add_executable(Unit_AerosolScatter_FineMode_TL mains/unit/Unit_Test/test_AerosolScatter_FineMode_TL.f90)
+target_link_libraries(Unit_AerosolScatter_FineMode_TL PRIVATE crtm)
+add_test(NAME test_Unit_AerosolScatter_FineMode_TL
+         COMMAND $<TARGET_FILE:Unit_AerosolScatter_FineMode_TL>)
+set_tests_properties(test_Unit_AerosolScatter_FineMode_TL PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=$ENV{OMP_NUM_THREADS}")
+
+add_executable(Unit_AerosolScatter_FineMode_AD mains/unit/Unit_Test/test_AerosolScatter_FineMode_AD.f90)
+target_link_libraries(Unit_AerosolScatter_FineMode_AD PRIVATE crtm)
+add_test(NAME test_Unit_AerosolScatter_FineMode_AD
+         COMMAND $<TARGET_FILE:Unit_AerosolScatter_FineMode_AD>)
+set_tests_properties(test_Unit_AerosolScatter_FineMode_AD PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=$ENV{OMP_NUM_THREADS}")
+
+add_executable(Unit_AerosolScatter_FineMode_K mains/unit/Unit_Test/test_AerosolScatter_FineMode_K.f90)
+target_link_libraries(Unit_AerosolScatter_FineMode_K PRIVATE crtm)
+add_test(NAME test_Unit_AerosolScatter_FineMode_K
+         COMMAND $<TARGET_FILE:Unit_AerosolScatter_FineMode_K>)
+set_tests_properties(test_Unit_AerosolScatter_FineMode_K PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=$ENV{OMP_NUM_THREADS}")
 
 add_executable(Unit_Aerosol_Bypass_TL mains/unit/Unit_Test/test_Aerosol_Bypass_TL.f90)
 target_link_libraries(Unit_Aerosol_Bypass_TL PRIVATE crtm)

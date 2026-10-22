@@ -17,6 +17,9 @@
 !       Modified by     Cheng Dang, 30-Mar-2022
 !                       dangch@ucar.edu
 !                       Add dimension n_RH_Radii
+!       Modified by     Mariusz Pagowski, 2026/10/22
+!                       mariusz.pagowski@colorado.edu
+!                       Read optional fmass1 for GOCART-GEOS5, otherwise set defaults
 
 MODULE AerosolCoeff_netCDF_IO
 
@@ -38,6 +41,7 @@ MODULE AerosolCoeff_netCDF_IO
                                  AerosolCoeff_Info         , &
                                  AerosolCoeff_Frequency
                                  !AerosolCoeff_DefineVersion
+  USE AerosolCoeff_fmass1_Default, ONLY: AerosolCoeff_Set_fmass1_Default
   USE netcdf
   ! Disable implicit typing
   IMPLICIT NONE
@@ -94,6 +98,7 @@ MODULE AerosolCoeff_netCDF_IO
   CHARACTER(*), PARAMETER :: W_VARNAME          = 'w'
   CHARACTER(*), PARAMETER :: G_VARNAME          = 'g'
   CHARACTER(*), PARAMETER :: PCOEFF_VARNAME     = 'pcoeff'
+  CHARACTER(*), PARAMETER :: FMASS1_VARNAME     = 'fmass1'
 
   ! Variable long name attribute.
   CHARACTER(*), PARAMETER :: LONGNAME_ATTNAME = 'long_name'
@@ -990,6 +995,9 @@ CONTAINS
     INTEGER :: n_Legendre_Terms
     INTEGER :: n_Phase_Elements
     INTEGER :: VarId
+    INTEGER :: fmass1_nDims
+    INTEGER :: fmass1_DimIds(NF90_MAX_VAR_DIMS)
+    INTEGER :: fmass1_DimLen(2)
 
 
     ! Set up
@@ -1164,6 +1172,45 @@ CONTAINS
         NF90_Status = NF90_GET_VAR( FileId,VarID,AerosolCoeff%kb )
         IF ( NF90_Status /= NF90_NOERR ) THEN
           msg = 'Error reading '//KB_VARNAME//' from '//TRIM(Filename)//&
+                ' - '//TRIM(NF90_STRERROR( NF90_Status ))
+          CALL Read_Cleanup(); RETURN
+        END IF
+      END IF
+    END IF
+    ! ...fmass1 variable, only for GOCART-GEOS5 scheme
+    IF ( Aerosol_Model == 'GOCART-GEOS5' ) THEN
+      NF90_Status = NF90_INQ_VARID( FileId,FMASS1_VARNAME,VarId )
+      ! Files without fmass1 use the default values
+      IF ( NF90_Status .EQ. NF90_ENOTVAR ) THEN
+        CALL AerosolCoeff_Set_fmass1_Default( AerosolCoeff )
+      ELSE
+        IF ( NF90_Status /= NF90_NOERR ) THEN
+          msg = 'Error inquiring '//TRIM(Filename)//' for '//FMASS1_VARNAME//&
+                ' variable ID - '//TRIM(NF90_STRERROR( NF90_Status ))
+          CALL Read_Cleanup(); RETURN
+        END IF
+        ! The fmass1 dimensions must be (n_Types, n_RH) in netCDF order
+        NF90_Status = NF90_INQUIRE_VARIABLE( FileId,VarId,nDims=fmass1_nDims,DimIds=fmass1_DimIds )
+        IF ( NF90_Status /= NF90_NOERR ) THEN
+          msg = 'Error inquiring '//TRIM(Filename)//' for '//FMASS1_VARNAME//&
+                ' dimensions - '//TRIM(NF90_STRERROR( NF90_Status ))
+          CALL Read_Cleanup(); RETURN
+        END IF
+        fmass1_DimLen = 0
+        IF ( fmass1_nDims == 2 ) THEN
+          NF90_Status = NF90_INQUIRE_DIMENSION( FileId,fmass1_DimIds(1),Len=fmass1_DimLen(1) )
+          NF90_Status = NF90_INQUIRE_DIMENSION( FileId,fmass1_DimIds(2),Len=fmass1_DimLen(2) )
+        END IF
+        IF ( fmass1_nDims /= 2 .OR. &
+             fmass1_DimLen(1) /= AerosolCoeff%n_RH .OR. &
+             fmass1_DimLen(2) /= AerosolCoeff%n_Types ) THEN
+          msg = 'Dimensions of '//FMASS1_VARNAME//' in '//TRIM(Filename)//&
+                ' are not (n_Types, n_RH)'
+          CALL Read_Cleanup(); RETURN
+        END IF
+        NF90_Status = NF90_GET_VAR( FileId,VarID,AerosolCoeff%fmass1 )
+        IF ( NF90_Status /= NF90_NOERR ) THEN
+          msg = 'Error reading '//FMASS1_VARNAME//' from '//TRIM(Filename)//&
                 ' - '//TRIM(NF90_STRERROR( NF90_Status ))
           CALL Read_Cleanup(); RETURN
         END IF

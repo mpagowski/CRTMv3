@@ -14,6 +14,9 @@
 !       Modified by     Cheng Dang, 30-Mar-2022
 !                       dangch@ucar.edu
 !                       Add dimension n_RH_Radii
+!       Modified by     Mariusz Pagowski, 2026/10/22
+!                       mariusz.pagowski@colorado.edu
+!                       Set default fmass1, which Binary files do not store
 
 MODULE AerosolCoeff_Binary_IO
 
@@ -31,6 +34,7 @@ MODULE AerosolCoeff_Binary_IO
                                  AerosolCoeff_ValidRelease, &
                                  AerosolCoeff_Info        , &
                                  AerosolCoeff_Frequency
+  USE AerosolCoeff_fmass1_Default, ONLY: AerosolCoeff_Set_fmass1_Default
 
   ! Disable implicit typing
   IMPLICIT NONE
@@ -533,6 +537,9 @@ CONTAINS
 
     ! ...Compute the frequencies
     CALL AerosolCoeff_Frequency( AerosolCoeff )
+
+    ! ...Binary files do not store fmass1, so use the default values
+    CALL AerosolCoeff_Set_fmass1_Default( AerosolCoeff )
 
     ! Close the file
     CLOSE( fid,IOSTAT=io_stat )

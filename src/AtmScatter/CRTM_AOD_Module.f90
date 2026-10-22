@@ -16,6 +16,10 @@
 !                       Added optional AAOD argument to CRTM_AOD, CRTM_AOD_TL,
 !                       CRTM_AOD_AD and CRTM_AOD_K to compute the absorption
 !                       aerosol optical depth (AAOD)
+!       Modified by     Mariusz Pagowski, 2026/10/22
+!                       mariusz.pagowski@colorado.edu
+!                       Added optional FINE_MODE argument to compute the fine-mode
+!                       AOD/AAOD, with each aerosol type scaled by its fmass1(RH)
 
 MODULE CRTM_AOD_Module
 
@@ -23,12 +27,14 @@ MODULE CRTM_AOD_Module
   ! ------------
   ! Module usage
   ! ------------
+  USE Type_Kinds,               ONLY: fp
   USE Message_Handler,          ONLY: SUCCESS, FAILURE, Display_Message
-  USE CRTM_Parameters,          ONLY: ZERO, &
+  USE CRTM_Parameters,          ONLY: ZERO, ONE, &
                                       MAX_N_PHASE_ELEMENTS, &
                                       MAX_N_LEGENDRE_TERMS
   USE CRTM_Atmosphere_Define,   ONLY: CRTM_Atmosphere_type, &
-                                      CRTM_Atmosphere_IsValid
+                                      CRTM_Atmosphere_IsValid, &
+                                      AerosolCoeff_BYPASS_AEROSOL
   USE CRTM_ChannelInfo_Define,  ONLY: CRTM_ChannelInfo_type, &
                                       CRTM_ChannelInfo_n_Channels
   USE CRTM_Options_Define,      ONLY: CRTM_Options_type
@@ -44,6 +50,7 @@ MODULE CRTM_AOD_Module
                                       CRTM_RTSolution_Associated
   USE CRTM_AerosolCoeff,        ONLY: CRTM_AerosolCoeff_IsLoaded, &
                                       AeroC
+  USE AerosolCoeff_Define,      ONLY: AerosolCoeff_typeID_to_index
 
   ! Internal variable definition modules
   ! ...AerosolScatter
@@ -94,7 +101,8 @@ CONTAINS
 !                                ChannelInfo      , &
 !                                RTSolution       , &
 !                                Options = Options, &
-!                                AAOD    = AAOD     )
+!                                AAOD      = AAOD     , &
+!                                FINE_MODE = FINE_MODE  )
 !
 ! INPUTS:
 !       Atmosphere:     Structure containing the Atmosphere data.
@@ -139,6 +147,19 @@ CONTAINS
 !                       DIMENSION:  Scalar
 !                       ATTRIBUTES: INTENT(IN), OPTIONAL
 !
+!       FINE_MODE:      Set to .TRUE. to compute the fine-mode AOD (or AAOD,
+!                       if AAOD is also .TRUE.). The concentration of each
+!                       aerosol type is scaled by its fmass1(RH), the fraction
+!                       of its mass in particles with diameter < 1 um,
+!                       linearly interpolated to the layer relative humidity.
+!                       Only available for the GOCART-GEOS5 aerosol scheme.
+!                       If not specified, or .FALSE., the total AOD (or AAOD)
+!                       is computed.
+!                       UNITS:      N/A
+!                       TYPE:       LOGICAL
+!                       DIMENSION:  Scalar
+!                       ATTRIBUTES: INTENT(IN), OPTIONAL
+!
 ! FUNCTION RESULT:
 !       Error_Status:   The return value is an integer defining the error status.
 !                       The error codes are defined in the Message_Handler module.
@@ -161,7 +182,8 @@ CONTAINS
     ChannelInfo, &  ! Input, M
     RTSolution , &  ! Output, L x M
     Options    , &  ! Optional input, M
-    AAOD       ) &  ! Optional input
+    AAOD       , &  ! Optional input
+    FINE_MODE  ) &  ! Optional input
   RESULT( Error_Status )
     ! Arguments
     TYPE(CRTM_Atmosphere_type),        INTENT(IN)     :: Atmosphere(:)     ! M
@@ -169,6 +191,7 @@ CONTAINS
     TYPE(CRTM_RTSolution_type),        INTENT(IN OUT) :: RTSolution(:,:)   ! L x M
     TYPE(CRTM_Options_type), OPTIONAL, INTENT(IN)     :: Options(:)        ! M
     LOGICAL,                 OPTIONAL, INTENT(IN)     :: AAOD
+    LOGICAL,                 OPTIONAL, INTENT(IN)     :: FINE_MODE
     ! Function result
     INTEGER :: Error_Status
     ! Local parameters
@@ -178,6 +201,7 @@ CONTAINS
     LOGICAL :: Options_Present
     LOGICAL :: Check_Input
     LOGICAL :: Compute_AAOD
+    LOGICAL :: Compute_FM
     INTEGER :: n, n_Sensors,  SensorIndex
     INTEGER :: l, n_Channels, ChannelIndex
     INTEGER :: m, n_Profiles
@@ -185,6 +209,9 @@ CONTAINS
     ! Component variables
     TYPE(CRTM_AtmOptics_type) :: AtmOptics
     TYPE(ASVar_type) :: ASvar
+    ! Fine-mode variables
+    TYPE(CRTM_Atmosphere_type) :: Atm           ! Atmosphere with fine-mode concentrations
+    REAL(fp), ALLOCATABLE :: f(:,:), f_RH(:,:)  ! fmass1 and d(fmass1)/d(RH), L x n_Aerosols
 
 
     ! ------
@@ -196,6 +223,9 @@ CONTAINS
     ! Compute absorption AOD (AAOD) instead of AOD if requested
     Compute_AAOD = .FALSE.
     IF ( PRESENT(AAOD) ) Compute_AAOD = AAOD
+    ! Compute the fine-mode AOD/AAOD if requested
+    Compute_FM = .FALSE.
+    IF ( PRESENT(FINE_MODE) ) Compute_FM = FINE_MODE
 
 
     ! If no sensors or channels, simply return
@@ -320,6 +350,19 @@ CONTAINS
       END IF
 
 
+      ! Fine-mode: scale the aerosol concentrations by fmass1
+      Atm = Atmosphere(m)
+      IF ( Compute_FM .AND. Atmosphere(m)%n_Aerosols > 0 ) THEN
+        Error_Status = FineMode_Factors( Atmosphere(m), f, f_RH )
+        IF ( Error_Status /= SUCCESS ) THEN
+          WRITE( Message,'("Error computing fine-mode factors for profile #",i0)' ) m
+          CALL Display_Message( ROUTINE_NAME, Message, Error_Status )
+          RETURN
+        END IF
+        CALL FineMode_Scale( Atmosphere(m), f, Atm )
+      END IF
+
+
       ! -----------
       ! SENSOR LOOP
       ! -----------
@@ -357,7 +400,7 @@ CONTAINS
 
           ! Compute the aerosol absorption/scattering properties
           IF ( Atmosphere(m)%n_Aerosols > 0 ) THEN
-            Error_Status = CRTM_Compute_AerosolScatter( Atmosphere(m), &  ! Input
+            Error_Status = CRTM_Compute_AerosolScatter( Atm          , &  ! Input
                                                         SensorIndex  , &  ! Input
                                                         ChannelIndex , &  ! Input
                                                         AtmOptics    , &  ! In/Output
@@ -407,7 +450,8 @@ CONTAINS
 !                                   RTSolution       , &
 !                                   RTSolution_TL    , &
 !                                   Options = Options, &
-!                                   AAOD    = AAOD     )
+!                                   AAOD      = AAOD     , &
+!                                   FINE_MODE = FINE_MODE  )
 !
 ! INPUTS:
 !       Atmosphere:     Structure containing the Atmosphere data.
@@ -465,6 +509,19 @@ CONTAINS
 !                       DIMENSION:  Scalar
 !                       ATTRIBUTES: INTENT(IN), OPTIONAL
 !
+!       FINE_MODE:      Set to .TRUE. to compute the fine-mode AOD (or AAOD,
+!                       if AAOD is also .TRUE.). The concentration of each
+!                       aerosol type is scaled by its fmass1(RH), the fraction
+!                       of its mass in particles with diameter < 1 um,
+!                       linearly interpolated to the layer relative humidity.
+!                       Only available for the GOCART-GEOS5 aerosol scheme.
+!                       If not specified, or .FALSE., the total AOD (or AAOD)
+!                       is computed.
+!                       UNITS:      N/A
+!                       TYPE:       LOGICAL
+!                       DIMENSION:  Scalar
+!                       ATTRIBUTES: INTENT(IN), OPTIONAL
+!
 ! FUNCTION RESULT:
 !       Error_Status:   The return value is an integer defining the error status.
 !                       The error codes are defined in the Message_Handler module.
@@ -489,7 +546,8 @@ CONTAINS
     RTSolution   , &  ! Output, L x M
     RTSolution_TL, &  ! Output, L x M
     Options      , &  ! Optional FWD input, M
-    AAOD         ) &  ! Optional input
+    AAOD         , &  ! Optional input
+    FINE_MODE    ) &  ! Optional input
   RESULT( Error_Status )
     ! Arguments
     TYPE(CRTM_Atmosphere_type),        INTENT(IN)     :: Atmosphere(:)      ! M
@@ -499,6 +557,7 @@ CONTAINS
     TYPE(CRTM_RTSolution_type),        INTENT(IN OUT) :: RTSolution_TL(:,:) ! L x M
     TYPE(CRTM_Options_type), OPTIONAL, INTENT(IN)     :: Options(:)         ! M
     LOGICAL,                 OPTIONAL, INTENT(IN)     :: AAOD
+    LOGICAL,                 OPTIONAL, INTENT(IN)     :: FINE_MODE
     ! Function result
     INTEGER :: Error_Status
     ! Local parameters
@@ -508,6 +567,7 @@ CONTAINS
     LOGICAL :: Options_Present
     LOGICAL :: Check_Input
     LOGICAL :: Compute_AAOD
+    LOGICAL :: Compute_FM
     INTEGER :: Status_FWD, Status_TL
     INTEGER :: n, n_Sensors,  SensorIndex
     INTEGER :: l, n_Channels, ChannelIndex
@@ -516,6 +576,9 @@ CONTAINS
     ! Component variables
     TYPE(CRTM_AtmOptics_type)   :: AtmOptics, AtmOptics_TL
     TYPE(ASVar_type) :: ASvar
+    ! Fine-mode variables
+    TYPE(CRTM_Atmosphere_type) :: Atm, Atm_TL   ! Atmospheres with fine-mode concentrations
+    REAL(fp), ALLOCATABLE :: f(:,:), f_RH(:,:)  ! fmass1 and d(fmass1)/d(RH), L x n_Aerosols
 
 
     ! ------
@@ -527,6 +590,9 @@ CONTAINS
     ! Compute absorption AOD (AAOD) instead of AOD if requested
     Compute_AAOD = .FALSE.
     IF ( PRESENT(AAOD) ) Compute_AAOD = AAOD
+    ! Compute the fine-mode AOD/AAOD if requested
+    Compute_FM = .FALSE.
+    IF ( PRESENT(FINE_MODE) ) Compute_FM = FINE_MODE
 
 
     ! If no sensors or channels, simply return
@@ -660,6 +726,22 @@ CONTAINS
       END IF
 
 
+      ! Fine-mode: scale the aerosol concentrations by fmass1
+      Atm = Atmosphere(m)
+      IF ( Compute_FM .AND. Atmosphere(m)%n_Aerosols > 0 ) THEN
+        Error_Status = FineMode_Factors( Atmosphere(m), f, f_RH )
+        IF ( Error_Status /= SUCCESS ) THEN
+          WRITE( Message,'("Error computing fine-mode factors for profile #",i0)' ) m
+          CALL Display_Message( ROUTINE_NAME, Message, Error_Status )
+          RETURN
+        END IF
+        CALL FineMode_Scale( Atmosphere(m), f, Atm )
+      END IF
+      Atm_TL = Atmosphere_TL(m)
+      IF ( Compute_FM .AND. Atmosphere(m)%n_Aerosols > 0 ) &
+        CALL FineMode_Scale_TL( Atmosphere(m), Atmosphere_TL(m), f, f_RH, Atm_TL )
+
+
       ! -----------
       ! SENSOR LOOP
       ! -----------
@@ -702,14 +784,14 @@ CONTAINS
 
           ! Compute the aerosol absorption/scattering properties
           IF ( Atmosphere(m)%n_Aerosols > 0 ) THEN
-            Status_FWD = CRTM_Compute_AerosolScatter( Atmosphere(m), &  ! Input
+            Status_FWD = CRTM_Compute_AerosolScatter( Atm          , &  ! Input
                                                       SensorIndex  , &  ! Input
                                                       ChannelIndex , &  ! Input
                                                       AtmOptics    , &  ! In/Output
                                                       ASVar          )  ! Internal variable output
-            Status_TL = CRTM_Compute_AerosolScatter_TL( Atmosphere(m)   , &  ! FWD Input
+            Status_TL = CRTM_Compute_AerosolScatter_TL( Atm             , &  ! FWD Input
                                                         AtmOptics       , &  ! FWD Input
-                                                        Atmosphere_TL(m), &  ! TL  Input
+                                                        Atm_TL          , &  ! TL  Input
                                                         SensorIndex     , &  ! Input
                                                         ChannelIndex    , &  ! Input
                                                         AtmOptics_TL    , &  ! TL  Output
@@ -764,7 +846,8 @@ CONTAINS
 !                                   RTSolution       , &
 !                                   Atmosphere_AD    , &
 !                                   Options = Options, &
-!                                   AAOD    = AAOD     )
+!                                   AAOD      = AAOD     , &
+!                                   FINE_MODE = FINE_MODE  )
 !
 ! INPUTS:
 !       Atmosphere:     Structure containing the Atmosphere data.
@@ -828,6 +911,19 @@ CONTAINS
 !                       DIMENSION:  Scalar
 !                       ATTRIBUTES: INTENT(IN), OPTIONAL
 !
+!       FINE_MODE:      Set to .TRUE. to compute the fine-mode AOD (or AAOD,
+!                       if AAOD is also .TRUE.). The concentration of each
+!                       aerosol type is scaled by its fmass1(RH), the fraction
+!                       of its mass in particles with diameter < 1 um,
+!                       linearly interpolated to the layer relative humidity.
+!                       Only available for the GOCART-GEOS5 aerosol scheme.
+!                       If not specified, or .FALSE., the total AOD (or AAOD)
+!                       is computed.
+!                       UNITS:      N/A
+!                       TYPE:       LOGICAL
+!                       DIMENSION:  Scalar
+!                       ATTRIBUTES: INTENT(IN), OPTIONAL
+!
 ! FUNCTION RESULT:
 !       Error_Status:   The return value is an integer defining the error status.
 !                       The error codes are defined in the Message_Handler module.
@@ -852,7 +948,8 @@ CONTAINS
     RTSolution   , &  ! Output, L x M
     Atmosphere_AD, &  ! Output, L x M
     Options      , &  ! Optional input, M
-    AAOD         ) &  ! Optional input
+    AAOD         , &  ! Optional input
+    FINE_MODE    ) &  ! Optional input
   RESULT( Error_Status )
     ! Arguments
     TYPE(CRTM_Atmosphere_type),        INTENT(IN)     :: Atmosphere(:)      ! M
@@ -862,6 +959,7 @@ CONTAINS
     TYPE(CRTM_Atmosphere_type),        INTENT(IN OUT) :: Atmosphere_AD(:)   ! M
     TYPE(CRTM_Options_type), OPTIONAL, INTENT(IN)     :: Options(:)         ! M
     LOGICAL,                 OPTIONAL, INTENT(IN)     :: AAOD
+    LOGICAL,                 OPTIONAL, INTENT(IN)     :: FINE_MODE
     ! Function result
     INTEGER :: Error_Status
     ! Local parameters
@@ -871,6 +969,7 @@ CONTAINS
     LOGICAL :: Options_Present
     LOGICAL :: Check_Input
     LOGICAL :: Compute_AAOD
+    LOGICAL :: Compute_FM
     INTEGER :: Status_FWD, Status_AD
     INTEGER :: n, n_Sensors,  SensorIndex
     INTEGER :: l, n_Channels, ChannelIndex
@@ -880,6 +979,10 @@ CONTAINS
     ! Component variables
     TYPE(CRTM_AtmOptics_type) :: AtmOptics, AtmOptics_AD
     TYPE(ASVar_type) :: ASvar
+    ! Fine-mode variables
+    TYPE(CRTM_Atmosphere_type) :: Atm           ! Atmosphere with fine-mode concentrations
+    REAL(fp), ALLOCATABLE :: f(:,:), f_RH(:,:)  ! fmass1 and d(fmass1)/d(RH), L x n_Aerosols
+    REAL(fp), ALLOCATABLE :: Conc_AD_in(:,:)     ! Input AD concentrations, L x n_Aerosols
 
 
     ! ------
@@ -891,6 +994,9 @@ CONTAINS
     ! Compute absorption AOD (AAOD) instead of AOD if requested
     Compute_AAOD = .FALSE.
     IF ( PRESENT(AAOD) ) Compute_AAOD = AAOD
+    ! Compute the fine-mode AOD/AAOD if requested
+    Compute_FM = .FALSE.
+    IF ( PRESENT(FINE_MODE) ) Compute_FM = FINE_MODE
 
 
     ! If no sensors or channels, simply return
@@ -1024,6 +1130,19 @@ CONTAINS
       END IF
 
 
+      ! Fine-mode: scale the aerosol concentrations by fmass1
+      Atm = Atmosphere(m)
+      IF ( Compute_FM .AND. Atmosphere(m)%n_Aerosols > 0 ) THEN
+        Error_Status = FineMode_Factors( Atmosphere(m), f, f_RH )
+        IF ( Error_Status /= SUCCESS ) THEN
+          WRITE( Message,'("Error computing fine-mode factors for profile #",i0)' ) m
+          CALL Display_Message( ROUTINE_NAME, Message, Error_Status )
+          RETURN
+        END IF
+        CALL FineMode_Scale( Atmosphere(m), f, Atm )
+      END IF
+
+
       ! Copy over atmosphere info to adjoint output
       ! ...Climatology
       Atmosphere_AD(m)%Climatology = Atmosphere(m)%Climatology
@@ -1080,18 +1199,23 @@ CONTAINS
 
           ! Compute the aerosol absorption/scattering properties
           IF ( Atmosphere(m)%n_Aerosols > 0 ) THEN
-            Status_FWD = CRTM_Compute_AerosolScatter( Atmosphere(m), &  ! Input
+            Status_FWD = CRTM_Compute_AerosolScatter( Atm          , &  ! Input
                                                       SensorIndex  , &  ! Input
                                                       ChannelIndex , &  ! Input
                                                       AtmOptics    , &  ! In/Output
                                                       ASVar          )  ! Internal variable output
-            Status_AD = CRTM_Compute_AerosolScatter_AD( Atmosphere(m)   , &  ! FWD Input
+            ! ...Fine-mode: accumulate the adjoint of the scaled concentrations
+            !    from zero, then map it back to the input concentrations and RH
+            IF ( Compute_FM ) CALL FineMode_Save_AD( Atmosphere_AD(m), Conc_AD_in )
+            Status_AD = CRTM_Compute_AerosolScatter_AD( Atm             , &  ! FWD Input
                                                         AtmOptics       , &  ! FWD Input
                                                         AtmOptics_AD    , &  ! AD  Input
                                                         SensorIndex     , &  ! Input
                                                         ChannelIndex    , &  ! Input
                                                         Atmosphere_AD(m), &  ! AD  Output
                                                         ASVar             )  ! Internal variable input
+            IF ( Compute_FM ) &
+              CALL FineMode_Scale_AD( Atmosphere(m), f, f_RH, Conc_AD_in, Atmosphere_AD(m) )
             IF ( Status_FWD /= SUCCESS .OR. Status_AD /= SUCCESS) THEN
               Error_Status = FAILURE
               WRITE( Message,'("Error computing AerosolScatter for ",a,&
@@ -1136,7 +1260,8 @@ CONTAINS
 !                                  RTSolution        , &
 !                                  Atmosphere_K      , &
 !                                  Opttions = Options, &
-!                                  AAOD    = AAOD     )
+!                                  AAOD      = AAOD     , &
+!                                  FINE_MODE = FINE_MODE  )
 !
 ! INPUTS:
 !       Atmosphere:     Structure containing the Atmosphere data.
@@ -1201,6 +1326,19 @@ CONTAINS
 !                       DIMENSION:  Scalar
 !                       ATTRIBUTES: INTENT(IN), OPTIONAL
 !
+!       FINE_MODE:      Set to .TRUE. to compute the fine-mode AOD (or AAOD,
+!                       if AAOD is also .TRUE.). The concentration of each
+!                       aerosol type is scaled by its fmass1(RH), the fraction
+!                       of its mass in particles with diameter < 1 um,
+!                       linearly interpolated to the layer relative humidity.
+!                       Only available for the GOCART-GEOS5 aerosol scheme.
+!                       If not specified, or .FALSE., the total AOD (or AAOD)
+!                       is computed.
+!                       UNITS:      N/A
+!                       TYPE:       LOGICAL
+!                       DIMENSION:  Scalar
+!                       ATTRIBUTES: INTENT(IN), OPTIONAL
+!
 ! FUNCTION RESULT:
 !       Error_Status:   The return value is an integer defining the error status.
 !                       The error codes are defined in the Message_Handler module.
@@ -1225,7 +1363,8 @@ CONTAINS
     RTSolution  , &  ! Output, L x M
     Atmosphere_K, &  ! Output, L x M
     Options     , &  ! Optional input, M
-    AAOD        ) &  ! Optional input
+    AAOD        , &  ! Optional input
+    FINE_MODE   ) &  ! Optional input
   RESULT( Error_Status )
     ! Arguments
     TYPE(CRTM_Atmosphere_type),        INTENT(IN)     :: Atmosphere(:)      ! M
@@ -1235,6 +1374,7 @@ CONTAINS
     TYPE(CRTM_Atmosphere_type),        INTENT(IN OUT) :: Atmosphere_K(:,:)  ! L x M
     TYPE(CRTM_Options_type), OPTIONAL, INTENT(IN)     :: Options(:)         ! M
     LOGICAL,                 OPTIONAL, INTENT(IN)     :: AAOD
+    LOGICAL,                 OPTIONAL, INTENT(IN)     :: FINE_MODE
     ! Function result
     INTEGER :: Error_Status
     ! Local parameters
@@ -1244,6 +1384,7 @@ CONTAINS
     LOGICAL :: Options_Present
     LOGICAL :: Check_Input
     LOGICAL :: Compute_AAOD
+    LOGICAL :: Compute_FM
     INTEGER :: Status_FWD, Status_K
     INTEGER :: n, n_Sensors,  SensorIndex
     INTEGER :: l, n_Channels, ChannelIndex
@@ -1253,6 +1394,10 @@ CONTAINS
     ! Component variables
     TYPE(CRTM_AtmOptics_type) :: AtmOptics, AtmOptics_K
     TYPE(ASVar_type) :: ASvar
+    ! Fine-mode variables
+    TYPE(CRTM_Atmosphere_type) :: Atm           ! Atmosphere with fine-mode concentrations
+    REAL(fp), ALLOCATABLE :: f(:,:), f_RH(:,:)  ! fmass1 and d(fmass1)/d(RH), L x n_Aerosols
+    REAL(fp), ALLOCATABLE :: Conc_K_in(:,:)     ! Input K concentrations, L x n_Aerosols
 
 
     ! ------
@@ -1264,6 +1409,9 @@ CONTAINS
     ! Compute absorption AOD (AAOD) instead of AOD if requested
     Compute_AAOD = .FALSE.
     IF ( PRESENT(AAOD) ) Compute_AAOD = AAOD
+    ! Compute the fine-mode AOD/AAOD if requested
+    Compute_FM = .FALSE.
+    IF ( PRESENT(FINE_MODE) ) Compute_FM = FINE_MODE
 
 
     ! If no sensors or channels, simply return
@@ -1402,6 +1550,19 @@ CONTAINS
       END IF
 
 
+      ! Fine-mode: scale the aerosol concentrations by fmass1
+      Atm = Atmosphere(m)
+      IF ( Compute_FM .AND. Atmosphere(m)%n_Aerosols > 0 ) THEN
+        Error_Status = FineMode_Factors( Atmosphere(m), f, f_RH )
+        IF ( Error_Status /= SUCCESS ) THEN
+          WRITE( Message,'("Error computing fine-mode factors for profile #",i0)' ) m
+          CALL Display_Message( ROUTINE_NAME, Message, Error_Status )
+          RETURN
+        END IF
+        CALL FineMode_Scale( Atmosphere(m), f, Atm )
+      END IF
+
+
       ! -----------
       ! SENSOR LOOP
       ! -----------
@@ -1458,18 +1619,23 @@ CONTAINS
 
           ! Compute the aerosol absorption/scattering properties
           IF ( Atmosphere(m)%n_Aerosols > 0 ) THEN
-            Status_FWD = CRTM_Compute_AerosolScatter( Atmosphere(m), &  ! Input
+            Status_FWD = CRTM_Compute_AerosolScatter( Atm          , &  ! Input
                                                       SensorIndex  , &  ! Input
                                                       ChannelIndex , &  ! Input
                                                       AtmOptics    , &  ! In/Output
                                                       ASVar          )  ! Internal variable output
-            Status_K = CRTM_Compute_AerosolScatter_AD( Atmosphere(m)     , &  ! FWD Input
+            ! ...Fine-mode: accumulate the K-matrix of the scaled concentrations
+            !    from zero, then map it back to the input concentrations and RH
+            IF ( Compute_FM ) CALL FineMode_Save_AD( Atmosphere_K(ln,m), Conc_K_in )
+            Status_K = CRTM_Compute_AerosolScatter_AD( Atm               , &  ! FWD Input
                                                        AtmOptics         , &  ! FWD Input
                                                        AtmOptics_K       , &  ! AD  Input
                                                        SensorIndex       , &  ! Input
                                                        ChannelIndex      , &  ! Input
                                                        Atmosphere_K(ln,m), &  ! AD  Output
                                                        ASVar               )  ! Internal variable input
+            IF ( Compute_FM ) &
+              CALL FineMode_Scale_AD( Atmosphere(m), f, f_RH, Conc_K_in, Atmosphere_K(ln,m) )
             IF ( Status_FWD /= SUCCESS .OR. Status_K /= SUCCESS) THEN
               Error_Status = FAILURE
               WRITE( Message,'("Error computing AerosolScatter for ",a,&
@@ -1495,4 +1661,216 @@ CONTAINS
 
     END DO Profile_Loop
    END FUNCTION CRTM_AOD_K
+
+
+!################################################################################
+!################################################################################
+!##                                                                            ##
+!##                        ## PRIVATE MODULE ROUTINES ##                       ##
+!##                                                                            ##
+!################################################################################
+!################################################################################
+
+  ! -------------------------------------------------------------
+  ! Function to compute the fine-mode factors, f = fmass1(RH), and
+  ! their derivatives with respect to RH, f_RH, for every aerosol
+  ! and layer. fmass1 is the AerosolCoeff fraction of the aerosol
+  ! mass in particles with diameter < 1 um.
+  ! -------------------------------------------------------------
+  FUNCTION FineMode_Factors( &
+    Atm , &  ! Input
+    f   , &  ! Output, L x n_Aerosols
+    f_RH) &  ! Output, L x n_Aerosols
+  RESULT( Error_Status )
+    ! Arguments
+    TYPE(CRTM_Atmosphere_type), INTENT(IN)  :: Atm
+    REAL(fp), ALLOCATABLE,      INTENT(OUT) :: f(:,:)
+    REAL(fp), ALLOCATABLE,      INTENT(OUT) :: f_RH(:,:)
+    ! Function result
+    INTEGER :: Error_Status
+    ! Local parameters
+    CHARACTER(*), PARAMETER :: ROUTINE_NAME = 'FineMode_Factors'
+    ! Local variables
+    CHARACTER(ML) :: Message
+    INTEGER :: k, na, it
+
+    Error_Status = SUCCESS
+    ALLOCATE( f(Atm%n_Layers, Atm%n_Aerosols), f_RH(Atm%n_Layers, Atm%n_Aerosols) )
+    f    = ONE
+    f_RH = ZERO
+
+    IF ( TRIM(AeroC%Scheme) /= 'GOCART-GEOS5' ) THEN
+      Error_Status = FAILURE
+      Message = 'FINE_MODE is only available for the GOCART-GEOS5 aerosol scheme, not '//&
+                TRIM(AeroC%Scheme)
+      CALL Display_Message( ROUTINE_NAME, Message, Error_Status )
+      RETURN
+    END IF
+
+    Aerosol_Loop: DO na = 1, Atm%n_Aerosols
+      IF ( Atm%Aerosol(na)%Type == AerosolCoeff_BYPASS_AEROSOL ) CYCLE Aerosol_Loop
+      it = AerosolCoeff_typeID_to_index( AeroC, Atm%Aerosol(na)%Type )
+      IF ( it < 1 ) THEN
+        Error_Status = FAILURE
+        WRITE( Message,'("Invalid aerosol type ",i0," for aerosol #",i0)' ) &
+               Atm%Aerosol(na)%Type, na
+        CALL Display_Message( ROUTINE_NAME, Message, Error_Status )
+        RETURN
+      END IF
+      DO k = 1, Atm%Aerosol(na)%n_Layers
+        CALL Interpolate_fmass1( AeroC%RH, AeroC%fmass1(:,it), Atm%Relative_Humidity(k), &
+                                 f(k,na), f_RH(k,na) )
+      END DO
+    END DO Aerosol_Loop
+
+  END FUNCTION FineMode_Factors
+
+
+  ! -------------------------------------------------------------
+  ! Subroutine to linearly interpolate fmass1 in relative humidity.
+  ! Outside the RH range of the table fmass1 is held constant, so
+  ! its derivative is zero.
+  ! -------------------------------------------------------------
+  SUBROUTINE Interpolate_fmass1( &
+    RH_LUT    , &  ! Input
+    fmass1_LUT, &  ! Input
+    RH        , &  ! Input
+    f         , &  ! Output
+    f_RH        )  ! Output, d(f)/d(RH)
+    ! Arguments
+    REAL(fp), INTENT(IN)  :: RH_LUT(:)
+    REAL(fp), INTENT(IN)  :: fmass1_LUT(:)
+    REAL(fp), INTENT(IN)  :: RH
+    REAL(fp), INTENT(OUT) :: f
+    REAL(fp), INTENT(OUT) :: f_RH
+    ! Local variables
+    INTEGER :: i, n
+
+    n = SIZE(RH_LUT)
+    IF ( RH <= RH_LUT(1) ) THEN
+      f    = fmass1_LUT(1)
+      f_RH = ZERO
+    ELSE IF ( RH >= RH_LUT(n) ) THEN
+      f    = fmass1_LUT(n)
+      f_RH = ZERO
+    ELSE
+      DO i = 1, n-1
+        IF ( RH <= RH_LUT(i+1) ) EXIT
+      END DO
+      f_RH = (fmass1_LUT(i+1) - fmass1_LUT(i)) / (RH_LUT(i+1) - RH_LUT(i))
+      f    = fmass1_LUT(i) + f_RH * (RH - RH_LUT(i))
+    END IF
+
+  END SUBROUTINE Interpolate_fmass1
+
+
+  ! -------------------------------------------------------------
+  ! Forward fine-mode scaling of the aerosol concentrations
+  !   c' = f.c
+  ! -------------------------------------------------------------
+  SUBROUTINE FineMode_Scale( &
+    Atm   , &  ! Input
+    f     , &  ! Input
+    Atm_FM  )  ! Output
+    ! Arguments
+    TYPE(CRTM_Atmosphere_type), INTENT(IN)     :: Atm
+    REAL(fp),                   INTENT(IN)     :: f(:,:)
+    TYPE(CRTM_Atmosphere_type), INTENT(IN OUT) :: Atm_FM
+    ! Local variables
+    INTEGER :: na, nl
+
+    DO na = 1, Atm%n_Aerosols
+      nl = Atm%Aerosol(na)%n_Layers
+      Atm_FM%Aerosol(na)%Concentration(1:nl) = f(1:nl,na) * Atm%Aerosol(na)%Concentration(1:nl)
+    END DO
+
+  END SUBROUTINE FineMode_Scale
+
+
+  ! -------------------------------------------------------------
+  ! Tangent-linear fine-mode scaling of the aerosol concentrations
+  !   c'_TL = f.c_TL + f_RH.c.RH_TL
+  ! -------------------------------------------------------------
+  SUBROUTINE FineMode_Scale_TL( &
+    Atm      , &  ! FWD Input
+    Atm_TL   , &  ! TL  Input
+    f        , &  ! Input
+    f_RH     , &  ! Input
+    Atm_FM_TL  )  ! TL  Output
+    ! Arguments
+    TYPE(CRTM_Atmosphere_type), INTENT(IN)     :: Atm
+    TYPE(CRTM_Atmosphere_type), INTENT(IN)     :: Atm_TL
+    REAL(fp),                   INTENT(IN)     :: f(:,:)
+    REAL(fp),                   INTENT(IN)     :: f_RH(:,:)
+    TYPE(CRTM_Atmosphere_type), INTENT(IN OUT) :: Atm_FM_TL
+    ! Local variables
+    INTEGER :: na, nl
+
+    DO na = 1, Atm%n_Aerosols
+      nl = Atm%Aerosol(na)%n_Layers
+      Atm_FM_TL%Aerosol(na)%Concentration(1:nl) = &
+        f(1:nl,na) * Atm_TL%Aerosol(na)%Concentration(1:nl) + &
+        f_RH(1:nl,na) * Atm%Aerosol(na)%Concentration(1:nl) * Atm_TL%Relative_Humidity(1:nl)
+    END DO
+
+  END SUBROUTINE FineMode_Scale_TL
+
+
+  ! -------------------------------------------------------------
+  ! Subroutine to save the input adjoint aerosol concentrations and
+  ! set them to zero, so that the adjoint of the scaled
+  ! concentrations, c'_AD, can be accumulated separately.
+  ! -------------------------------------------------------------
+  SUBROUTINE FineMode_Save_AD( &
+    Atm_AD    , &  ! AD In/Output
+    Conc_AD_in  )  ! Output, L x n_Aerosols
+    ! Arguments
+    TYPE(CRTM_Atmosphere_type), INTENT(IN OUT) :: Atm_AD
+    REAL(fp), ALLOCATABLE,      INTENT(OUT)    :: Conc_AD_in(:,:)
+    ! Local variables
+    INTEGER :: na, nl
+
+    ALLOCATE( Conc_AD_in(Atm_AD%n_Layers, Atm_AD%n_Aerosols) )
+    Conc_AD_in = ZERO
+    DO na = 1, Atm_AD%n_Aerosols
+      nl = Atm_AD%Aerosol(na)%n_Layers
+      Conc_AD_in(1:nl,na) = Atm_AD%Aerosol(na)%Concentration(1:nl)
+      Atm_AD%Aerosol(na)%Concentration(1:nl) = ZERO
+    END DO
+
+  END SUBROUTINE FineMode_Save_AD
+
+
+  ! -------------------------------------------------------------
+  ! Adjoint fine-mode scaling of the aerosol concentrations. On
+  ! input the Atm_AD concentrations hold c'_AD, the adjoint of the
+  ! scaled concentrations:
+  !   RH_AD = RH_AD + f_RH.c.c'_AD
+  !   c_AD  = c_AD(input) + f.c'_AD
+  ! -------------------------------------------------------------
+  SUBROUTINE FineMode_Scale_AD( &
+    Atm       , &  ! FWD Input
+    f         , &  ! Input
+    f_RH      , &  ! Input
+    Conc_AD_in, &  ! Input
+    Atm_AD      )  ! AD In/Output
+    ! Arguments
+    TYPE(CRTM_Atmosphere_type), INTENT(IN)     :: Atm
+    REAL(fp),                   INTENT(IN)     :: f(:,:)
+    REAL(fp),                   INTENT(IN)     :: f_RH(:,:)
+    REAL(fp),                   INTENT(IN)     :: Conc_AD_in(:,:)
+    TYPE(CRTM_Atmosphere_type), INTENT(IN OUT) :: Atm_AD
+    ! Local variables
+    INTEGER :: na, nl
+
+    DO na = 1, Atm%n_Aerosols
+      nl = Atm%Aerosol(na)%n_Layers
+      Atm_AD%Relative_Humidity(1:nl) = Atm_AD%Relative_Humidity(1:nl) + &
+        f_RH(1:nl,na) * Atm%Aerosol(na)%Concentration(1:nl) * Atm_AD%Aerosol(na)%Concentration(1:nl)
+      Atm_AD%Aerosol(na)%Concentration(1:nl) = Conc_AD_in(1:nl,na) + &
+        f(1:nl,na) * Atm_AD%Aerosol(na)%Concentration(1:nl)
+    END DO
+
+  END SUBROUTINE FineMode_Scale_AD
+
 END MODULE CRTM_AOD_Module

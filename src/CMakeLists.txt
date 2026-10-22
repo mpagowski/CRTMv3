@@ -45,6 +45,7 @@ list( APPEND crtm_src_files
       Coefficients/ACCoeff/ACCoeff_Define.f90
       Coefficients/AerosolCoeff/AerosolCoeff_Binary_IO.f90
       Coefficients/AerosolCoeff/AerosolCoeff_Define.f90
+      Coefficients/AerosolCoeff/AerosolCoeff_fmass1_Default.f90
       Coefficients/AerosolCoeff/AerosolCoeff_netCDF_IO.f90
       Coefficients/AerosolCoeff/AerosolCoeff_IO.f90
       Coefficients/BeCoeff/BeCoeff_Binary_IO.f90
